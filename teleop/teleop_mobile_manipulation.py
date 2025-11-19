@@ -16,7 +16,7 @@ Control Mapping:
     - Right Joystick: Height Up/Down (Y), Turn Left/Right (X)
     - Y Button (Left): Start teleoperation
     - X Button (Left): Start recording
-    - B Button (Right): Stop recording
+    - B Button (Right): Stop recording & reset scene
     - A Button (Right): Emergency stop & exit
     - Triggers: Gripper control
 """
@@ -211,6 +211,10 @@ if __name__ == '__main__':
             locomotion_publisher = ChannelPublisher("rt/run_command/cmd", String_)
             locomotion_publisher.Init()
             
+            # Initialize sim state subscriber for recording
+            from teleop.utils.sim_state_topic import start_sim_state_subscribe
+            sim_state_subscriber = start_sim_state_subscribe()
+            
             # Locomotion parameters
             default_height = 0.8
             locomotion_ranges = {
@@ -238,7 +242,7 @@ if __name__ == '__main__':
         logger_mp.info("  Buttons (Quest Controller):")
         logger_mp.info("    🟢 Y Button (Left):  Start Running")
         logger_mp.info("    🔵 X Button (Left):  Start Recording")
-        logger_mp.info("    🔴 B Button (Right): Stop Recording")
+        logger_mp.info("    🔴 B Button (Right): Stop Recording & Reset Scene")
         logger_mp.info("    🔴 A Button (Right): Emergency Stop & Exit")
         logger_mp.info("=" * 60)
         logger_mp.info("Please press Y button (left controller) to start")
@@ -258,7 +262,7 @@ if __name__ == '__main__':
             start_time = time.time()
 
             if not args.headless:
-                tv_resized_image = cv2.resize(tv_img_array, (tv_img_shape[1] // 2, tv_img_shape[0] // 2))
+                tv_resized_image = cv2.resize(tv_img_array, (tv_img_shape[1], tv_img_shape[0]))
                 cv2.imshow("Mobile Manipulation View", tv_resized_image)
                 # opencv GUI communication
                 key = cv2.waitKey(1) & 0xFF
@@ -284,14 +288,14 @@ if __name__ == '__main__':
                 logger_mp.info("🔴 Emergency stop! Exiting...")
             
             # X button on left controller: Start recording (X = lower button = aButton)
-            if tele_data.tele_state.left_aButton and not RECORD_RUNNING:  # Quest: X button = left_aButton
+            if tele_data.tele_state.left_aButton and not RECORD_RUNNING:
                 RECORD_TOGGLE = True
-                logger_mp.info("🔵 Start recording button pressed")
+                logger_mp.info("🔵 X button: Start recording pressed")
             
-            # B button on right controller: Stop recording (B = upper button = bButton)
-            if tele_data.tele_state.right_bButton and RECORD_RUNNING:  # Quest: B button = right_bButton
+            # B button on right controller: Stop recording & reset (B = upper button = bButton)
+            if tele_data.tele_state.right_bButton and RECORD_RUNNING:
                 RECORD_TOGGLE = True
-                logger_mp.info("🔴 Stop recording button pressed")
+                logger_mp.info("🔴 B button: Stop recording pressed")
 
             if args.record and RECORD_TOGGLE:
                 RECORD_TOGGLE = False
@@ -306,7 +310,8 @@ if __name__ == '__main__':
                     recorder.save_episode()
                     logger_mp.info("💾 Recording saved")
                     if args.sim:
-                        publish_reset_category(1, reset_pose_publisher)
+                        logger_mp.info("🔄 Resetting scene...")
+                        publish_reset_category(2, reset_pose_publisher)  # Full scene reset
             
             # ========== GRIPPER CONTROL ==========
             if args.ee == "dex1":
@@ -327,7 +332,7 @@ if __name__ == '__main__':
                 
                 # Right joystick: turn (x) and height (y)
                 yaw_vel = -right_joy[0] * locomotion_ranges['yaw_vel'][1]  # rotation
-                height_offset = right_joy[1] * abs(locomotion_ranges['height'][0])  # height adjustment
+                height_offset = -right_joy[1] * abs(locomotion_ranges['height'][0])  # height adjustment
                 
                 # Clamp values to ranges
                 x_vel = np.clip(x_vel, locomotion_ranges['x_vel'][0], locomotion_ranges['x_vel'][1])
@@ -472,7 +477,9 @@ if __name__ == '__main__':
                         }, 
                     }
                     
-                    recorder.add_item(colors=colors, depths=depths, states=states, actions=actions)
+                    # Read sim_state for replay compatibility
+                    sim_state = sim_state_subscriber.read_data() if args.sim else None
+                    recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state)
 
             current_time = time.time()
             time_elapsed = current_time - start_time
@@ -487,6 +494,10 @@ if __name__ == '__main__':
         if args.sim:
             publish_locomotion_command(0.0, 0.0, 0.0, default_height, locomotion_publisher)
             logger_mp.info("Locomotion stopped")
+            # Stop sim state subscriber
+            if 'sim_state_subscriber' in locals():
+                sim_state_subscriber.stop_subscribe()
+                logger_mp.info("Sim state subscriber stopped")
         
         arm_ctrl.ctrl_dual_arm_go_home()
 

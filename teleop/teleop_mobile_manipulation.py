@@ -13,12 +13,12 @@ Quest Controller Button Mapping (OpenXR standard):
 
 Control Mapping:
     - Left Joystick: Forward/Backward (Y), Strafe Left/Right (X)
-    - Right Joystick: Height Up/Down (Y), Turn Left/Right (X)
+    - Right Joystick: Turn Left/Right (X) [Height control disabled]
     - Y Button (Left): Start teleoperation
-    - X Button (Left): Start recording
-    - B Button (Right): Stop recording & reset scene
+    - X Button (Left): Toggle recording (start/stop)
+    - B Button (Right): Stop base movement (zero velocity, maintain height)
     - A Button (Right): Emergency stop & exit
-    - Triggers: Gripper control
+    - Triggers: Gripper control (Dex1) / Hand control (Dex3 thumb)
 """
 
 import numpy as np
@@ -63,11 +63,28 @@ def publish_locomotion_command(x_vel, y_vel, yaw_vel, height, publisher):
     publisher.Write(msg)
 
 # state transition
-START          = False  # Enable to start robot following VR user motion  
-STOP           = False  # Enable to begin system exit procedure
-RECORD_TOGGLE  = False  # [Ready] ⇄ [Recording] ⟶ [AutoSave] ⟶ [Ready]         (⇄ manual) (⟶ auto)
-RECORD_RUNNING = False  # True if [Recording]
-RECORD_READY   = True   # True if [Ready], False if [Recording] / [AutoSave]
+START              = False  # Enable to start robot following VR user motion  
+STOP               = False  # Enable to begin system exit procedure
+STOP_BASE_MOVEMENT = False  # True when B button pressed - stops base movement
+RECORD_TOGGLE      = False  # [Ready] ⇄ [Recording] ⟶ [AutoSave] ⟶ [Ready]         (⇄ manual) (⟶ auto)
+RECORD_RUNNING     = False  # True if [Recording]
+RECORD_READY       = True   # True if [Ready], False if [Recording] / [AutoSave]
+
+# Button state tracking for edge detection
+prev_left_aButton = False
+
+# Dex3 thumb control constants (for joystick button control)
+DEX3_LEFT_LIMITS = {
+    "thumb0": (-1.04719755, 1.04719755),
+    "thumb1": (-0.72431163, 1.04719755),
+    "thumb2": (0.0, 1.74532925),
+}
+# Left thumb1 target range
+THUMB1_MIN_RAD = -30.0 * np.pi / 180.0          # closed
+THUMB1_MAX_RAD = 60.0 * np.pi / 180.0  # open
+# Right thumb1 target range
+R_THUMB1_MIN_RAD = -60.0 * np.pi / 180.0  # open
+R_THUMB1_MAX_RAD = 30.0 * np.pi / 180.0        # closed
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -177,7 +194,34 @@ if __name__ == '__main__':
             dual_hand_data_lock = Lock()
             dual_hand_state_array = Array('d', 14, lock = False)   # [output] current left, right hand state(14) data.
             dual_hand_action_array = Array('d', 14, lock = False)  # [output] current left, right hand action(14) data.
-            hand_ctrl = Dex3_1_Controller(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
+            # Command arrays for trigger control (7 joints: thumb0, thumb1, thumb2, middle0, middle1, index0, index1)
+            left_dex3_cmd_q_array = Array('d', 7, lock=True)
+            right_dex3_cmd_q_array = Array('d', 7, lock=True)
+            # Initialize with default positions
+            with left_dex3_cmd_q_array.get_lock():
+                left_init = np.array([
+                    0.0 * np.pi / 180.0,  # thumb0
+                    -30.0 * np.pi / 180.0,                    # thumb1 (controlled by trigger)
+                    50.0 * np.pi / 180.0,                    # thumb2
+                    -90.0 * np.pi / 180.0,  # middle0
+                    -0.0 * np.pi / 180.0,  # middle1
+                    -90.0 * np.pi / 180.0,  # index0
+                    -0.0 * np.pi / 180.0,  # index1
+                ], dtype=float)
+                left_dex3_cmd_q_array[:] = left_init
+            with right_dex3_cmd_q_array.get_lock():
+                right_init = np.array([
+                    0.0 * np.pi / 180.0,  # thumb0
+                    30.0 * np.pi / 180.0,                    # thumb1 (controlled by trigger)
+                    -50.0 * np.pi / 180.0,                    # thumb2
+                    90.0 * np.pi / 180.0,   # middle0 (placeholder)
+                    0.0 * np.pi / 180.0,   # middle1 (placeholder)
+                    90.0 * np.pi / 180.0,   # index0
+                    0.0 * np.pi / 180.0,   # index1
+                ], dtype=float)
+                right_dex3_cmd_q_array[:] = right_init
+            hand_ctrl = Dex3_1_Controller(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim,
+                                          left_cmd_q_in=left_dex3_cmd_q_array, right_cmd_q_in=right_dex3_cmd_q_array)
         elif args.ee == "dex1":
             left_gripper_value = Value('d', 0.0, lock=True)        # [input]
             right_gripper_value = Value('d', 0.0, lock=True)       # [input]
@@ -218,7 +262,7 @@ if __name__ == '__main__':
             # Locomotion parameters
             default_height = 0.8
             locomotion_ranges = {
-                'x_vel': (-0.6, 1.0),     # forward/backward velocity
+                'x_vel': (-0.6, 0.6),     # forward/backward velocity
                 'y_vel': (-0.5, 0.5),     # lateral velocity
                 'yaw_vel': (-1.57, 1.57), # yaw velocity
                 'height': (-0.5, 0.0)     # height offset from default
@@ -237,13 +281,17 @@ if __name__ == '__main__':
         logger_mp.info("    ↕️  Y-axis: Forward/Backward")
         logger_mp.info("    ↔️  X-axis: Strafe Left/Right")
         logger_mp.info("  Right Joystick:")
-        logger_mp.info("    ↕️  Y-axis: Height Up/Down")
         logger_mp.info("    ↔️  X-axis: Turn Left/Right")
+        logger_mp.info("    ⚠️  Y-axis: Height control DISABLED")
         logger_mp.info("  Buttons (Quest Controller):")
         logger_mp.info("    🟢 Y Button (Left):  Start Running")
-        logger_mp.info("    🔵 X Button (Left):  Start Recording")
-        logger_mp.info("    🔴 B Button (Right): Stop Recording & Reset Scene")
+        logger_mp.info("    🔵 X Button (Left):  Toggle Recording (Start/Stop)")
+        logger_mp.info("    ⏸️  B Button (Right): Stop Base Movement (0 velocity, maintain height)")
         logger_mp.info("    🔴 A Button (Right): Emergency Stop & Exit")
+        if args.ee == "dex1":
+            logger_mp.info("  🎯 Triggers: Gripper control (Dex1)")
+        elif args.ee == "dex3":
+            logger_mp.info("  🎯 Triggers: Hand thumb control (Dex3)")
         logger_mp.info("=" * 60)
         logger_mp.info("Please press Y button (left controller) to start")
         
@@ -264,6 +312,12 @@ if __name__ == '__main__':
             if not args.headless:
                 tv_resized_image = cv2.resize(tv_img_array, (tv_img_shape[1], tv_img_shape[0]))
                 cv2.imshow("Mobile Manipulation View", tv_resized_image)
+                
+                # Display wrist camera if available
+                if WRIST:
+                    wrist_resized_image = cv2.resize(wrist_img_array, (wrist_img_shape[1], wrist_img_shape[0]))
+                    cv2.imshow("Wrist Camera View", wrist_resized_image)
+                
                 # opencv GUI communication
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
@@ -287,15 +341,18 @@ if __name__ == '__main__':
                 STOP = True
                 logger_mp.info("🔴 Emergency stop! Exiting...")
             
-            # X button on left controller: Start recording (X = lower button = aButton)
-            if tele_data.tele_state.left_aButton and not RECORD_RUNNING:
+            # X button on left controller: Toggle recording (X = lower button = aButton)
+            # Use edge detection - only trigger on button press, not while held
+            if tele_data.tele_state.left_aButton and not prev_left_aButton:
                 RECORD_TOGGLE = True
-                logger_mp.info("🔵 X button: Start recording pressed")
+                if RECORD_RUNNING:
+                    logger_mp.info("🔵 X button: Stop recording pressed")
+                else:
+                    logger_mp.info("🔵 X button: Start recording pressed")
+            prev_left_aButton = tele_data.tele_state.left_aButton
             
-            # B button on right controller: Stop recording & reset (B = upper button = bButton)
-            if tele_data.tele_state.right_bButton and RECORD_RUNNING:
-                RECORD_TOGGLE = True
-                logger_mp.info("🔴 B button: Stop recording pressed")
+            # B button on right controller: Stop base movement (B = upper button = bButton)
+            STOP_BASE_MOVEMENT = tele_data.tele_state.right_bButton
 
             if args.record and RECORD_TOGGLE:
                 RECORD_TOGGLE = False
@@ -308,17 +365,51 @@ if __name__ == '__main__':
                 else:
                     RECORD_RUNNING = False
                     recorder.save_episode()
-                    logger_mp.info("💾 Recording saved")
+                    logger_mp.info("💾 Recording saved & scene reset")
                     if args.sim:
-                        logger_mp.info("🔄 Resetting scene...")
                         publish_reset_category(2, reset_pose_publisher)  # Full scene reset
             
-            # ========== GRIPPER CONTROL ==========
+            # ========== GRIPPER/HAND CONTROL ==========
             if args.ee == "dex1":
                 with left_gripper_value.get_lock():
                     left_gripper_value.value = tele_data.left_trigger_value
                 with right_gripper_value.get_lock():
                     right_gripper_value.value = tele_data.right_trigger_value
+            elif args.ee == "dex3":
+                # Dex3 controller mode - Trigger continuous control
+                # Read current command arrays
+                with left_dex3_cmd_q_array.get_lock():
+                    left_cmd = np.array(left_dex3_cmd_q_array[:])
+                with right_dex3_cmd_q_array.get_lock():
+                    right_cmd = np.array(right_dex3_cmd_q_array[:])
+
+                # Get trigger values
+                # Note: televuer returns trigger_value in range [10.0, 0.0] (inverted)
+                # We need to normalize to [0.0, 1.0]
+                left_trigger_raw = getattr(tele_data, 'left_trigger_value', 10.0)
+                right_trigger_raw = getattr(tele_data, 'right_trigger_value', 10.0)
+                
+                # Normalize: 10.0 -> 0.0 (not pressed), 0.0 -> 1.0 (fully pressed)
+                left_trigger = np.clip((10.0 - left_trigger_raw) / 10.0, 0.0, 1.0)
+                right_trigger = np.clip((10.0 - right_trigger_raw) / 10.0, 0.0, 1.0)
+                
+                # Map trigger values to thumb1 range
+                # Left trigger: 0.0 -> THUMB1_MIN_RAD (closed), 1.0 -> THUMB1_MAX_RAD (open)
+                left_cmd[1] = THUMB1_MIN_RAD + left_trigger * (THUMB1_MAX_RAD - THUMB1_MIN_RAD)
+                
+                # Right trigger: 0.0 -> R_THUMB1_MAX_RAD (closed), 1.0 -> R_THUMB1_MIN_RAD (open)
+                # (note: right hand has inverted range)
+                right_cmd[1] = R_THUMB1_MAX_RAD + right_trigger * (R_THUMB1_MIN_RAD - R_THUMB1_MAX_RAD)
+
+                # Final safety clipping for all joints
+                left_cmd[0] = np.clip(left_cmd[0], *DEX3_LEFT_LIMITS["thumb0"])
+                left_cmd[1] = np.clip(left_cmd[1], *DEX3_LEFT_LIMITS["thumb1"])
+                left_cmd[2] = np.clip(left_cmd[2], *DEX3_LEFT_LIMITS["thumb2"])
+
+                with left_dex3_cmd_q_array.get_lock():
+                    left_dex3_cmd_q_array[:] = left_cmd
+                with right_dex3_cmd_q_array.get_lock():
+                    right_dex3_cmd_q_array[:] = right_cmd
             
             # ========== LOCOMOTION CONTROL ==========
             if args.sim:
@@ -326,21 +417,29 @@ if __name__ == '__main__':
                 left_joy = tele_data.tele_state.left_thumbstick_value   # [x, y]
                 right_joy = tele_data.tele_state.right_thumbstick_value # [x, y]
                 
-                # Left joystick: forward/backward (y) and strafe (x)
-                x_vel = -left_joy[1] * locomotion_ranges['x_vel'][1]  # forward/backward
-                y_vel = -left_joy[0] * locomotion_ranges['y_vel'][1]  # left/right strafe
-                
-                # Right joystick: turn (x) and height (y)
-                yaw_vel = -right_joy[0] * locomotion_ranges['yaw_vel'][1]  # rotation
-                height_offset = -right_joy[1] * abs(locomotion_ranges['height'][0])  # height adjustment
-                
-                # Clamp values to ranges
-                x_vel = np.clip(x_vel, locomotion_ranges['x_vel'][0], locomotion_ranges['x_vel'][1])
-                y_vel = np.clip(y_vel, locomotion_ranges['y_vel'][0], locomotion_ranges['y_vel'][1])
-                yaw_vel = np.clip(yaw_vel, locomotion_ranges['yaw_vel'][0], locomotion_ranges['yaw_vel'][1])
-                height_offset = np.clip(height_offset, locomotion_ranges['height'][0], locomotion_ranges['height'][1])
-                
-                current_height = default_height + height_offset
+                if not STOP_BASE_MOVEMENT:
+                    # Normal operation - joystick control
+                    # Left joystick: forward/backward (y) and strafe (x)
+                    x_vel = -left_joy[1] * locomotion_ranges['x_vel'][1]  # forward/backward
+                    y_vel = -left_joy[0] * locomotion_ranges['y_vel'][1]  # left/right strafe
+                    
+                    # Right joystick: turn (x) only, height disabled
+                    yaw_vel = -right_joy[0] * locomotion_ranges['yaw_vel'][1]  # rotation
+                    # height_offset = -right_joy[1] * abs(locomotion_ranges['height'][0])  # height adjustment (DISABLED)
+                    
+                    # Clamp values to ranges
+                    x_vel = np.clip(x_vel, locomotion_ranges['x_vel'][0], locomotion_ranges['x_vel'][1])
+                    y_vel = np.clip(y_vel, locomotion_ranges['y_vel'][0], locomotion_ranges['y_vel'][1])
+                    yaw_vel = np.clip(yaw_vel, locomotion_ranges['yaw_vel'][0], locomotion_ranges['yaw_vel'][1])
+                    # height_offset = np.clip(height_offset, locomotion_ranges['height'][0], locomotion_ranges['height'][1])  # (DISABLED)
+                    
+                    current_height = default_height  # Fixed height (height control disabled)
+                else:
+                    # B button pressed - stop base movement, maintain current height
+                    x_vel = 0.0
+                    y_vel = 0.0
+                    yaw_vel = 0.0
+                    # Keep current_height from last frame (don't update)
                 
                 # Publish locomotion command
                 publish_locomotion_command(x_vel, y_vel, yaw_vel, current_height, locomotion_publisher)

@@ -33,7 +33,8 @@ kTopicDex3RightState = "rt/dex3/right/state"
 
 class Dex3_1_Controller:
     def __init__(self, left_hand_array_in, right_hand_array_in, dual_hand_data_lock = None, dual_hand_state_array_out = None,
-                       dual_hand_action_array_out = None, fps = 100.0, Unit_Test = False, simulation_mode = False):
+                       dual_hand_action_array_out = None, fps = 100.0, Unit_Test = False, simulation_mode = False,
+                       left_cmd_q_in = None, right_cmd_q_in = None):
         """
         [note] A *_array type parameter requires using a multiprocessing Array, because it needs to be passed to the internal child process
 
@@ -96,7 +97,7 @@ class Dex3_1_Controller:
         logger_mp.info("[Dex3_1_Controller] Subscribe dds ok.")
 
         hand_control_process = Process(target=self.control_process, args=(left_hand_array_in, right_hand_array_in,  self.left_hand_state_array, self.right_hand_state_array,
-                                                                          dual_hand_data_lock, dual_hand_state_array_out, dual_hand_action_array_out))
+                                                                          dual_hand_data_lock, dual_hand_state_array_out, dual_hand_action_array_out, left_cmd_q_in, right_cmd_q_in))
         hand_control_process.daemon = True
         hand_control_process.start()
 
@@ -140,7 +141,8 @@ class Dex3_1_Controller:
         # logger_mp.debug("hand ctrl publish ok.")
     
     def control_process(self, left_hand_array_in, right_hand_array_in, left_hand_state_array, right_hand_state_array,
-                              dual_hand_data_lock = None, dual_hand_state_array_out = None, dual_hand_action_array_out = None):
+                              dual_hand_data_lock = None, dual_hand_state_array_out = None, dual_hand_action_array_out = None,
+                              left_cmd_q_in = None, right_cmd_q_in = None):
         self.running = True
 
         left_q_target  = np.full(Dex3_Num_Motors, 0)
@@ -194,6 +196,16 @@ class Dex3_1_Controller:
 
                     left_q_target  = self.hand_retargeting.left_retargeting.retarget(ref_left_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
                     right_q_target = self.hand_retargeting.right_retargeting.retarget(ref_right_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
+
+                # If explicit joint commands are provided (controller mode), override targets
+                if left_cmd_q_in is not None and right_cmd_q_in is not None:
+                    try:
+                        with left_cmd_q_in.get_lock():
+                            left_q_target = np.array(left_cmd_q_in[:]).copy()
+                        with right_cmd_q_in.get_lock():
+                            right_q_target = np.array(right_cmd_q_in[:]).copy()
+                    except Exception as e:
+                        logger_mp.warning(f"[Dex3_1_Controller] Failed to read cmd arrays: {e}")
 
                 # get dual hand action
                 action_data = np.concatenate((left_q_target, right_q_target))    

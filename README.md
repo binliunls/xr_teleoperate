@@ -47,7 +47,7 @@
 
 # 0. 📖 Introduction
 
-This repository implements **teleoperation** control of a **Unitree humanoid robot** using **XR (Extended Reality) devices** (such as Apple Vision Pro, PICO 4 Ultra Enterprise, or Meta Quest 3). 
+This repository implements **teleoperation** control of a **Unitree humanoid robot** using **XR (Extended Reality) devices** (such as Apple Vision Pro, PICO 4 Ultra Enterprise, or Meta Quest 3).
 
 > If you have never worked with a Unitree robot before, please at least read up to the “Application Development” chapter in the [official documentation](https://support.unitree.com/main/en) first.
 Additionally, the [Wiki of this repo](https://github.com/unitreerobotics/xr_teleoperate/wiki) contains a wealth of background knowledge that you can reference at any time.
@@ -284,10 +284,10 @@ Next steps:
 
 2. Connect to the corresponding Wi‑Fi
 
-3. Only proceed if your head camera has WebRTC enabled (`cam_config_server.yaml → head_camera → enable_webrtc: true`); otherwise jump to Step 4. Open a browser (e.g. Safari or PICO Browser) and go to:  
+3. Only proceed if your head camera has WebRTC enabled (`cam_config_server.yaml → head_camera → enable_webrtc: true`); otherwise jump to Step 4. Open a browser (e.g. Safari or PICO Browser) and go to:
    **https://192.168.123.164:60001**
 
-   > **Note 1:** This IP is the address of **PC2**—the machine running teleimager service.  
+   > **Note 1:** This IP is the address of **PC2**—the machine running teleimager service.
    > **Note 2:** You may see a warning page like step 4. Click **Advanced**, then **Proceed to IP (unsafe)**. Once the page loads, press the **start** button in the top-left corner; if you see the head-camera preview, the check is successful.
    >
    > <p align="center">
@@ -296,14 +296,15 @@ Next steps:
    >   </a>
    > </p>
    >
-   > **Note 3:** This step serves two purposes:  
+   > **Note 3:** This step serves two purposes:
    >
-   > 1. Verify that the teleimager service is running correctly.  
-   > 2. Manually trust the WebRTC self-signed certificate.  
+   > 1. Verify that the teleimager service is running correctly.
+   > 2. Manually trust the WebRTC self-signed certificate.
    >
    > Once this has been done on the same device with the same certificate, you can skip it on subsequent launches.
 
-4. Open a browser (e.g. Safari or PICO Browser) and go to:  `https://192.168.123.2:8012/?ws=wss://192.168.123.2:8012`
+4. Open a browser (e.g. Safari or PICO Browser) and go to:  `https://192.168.123.2:8012/?ws=wss://192.168.123.2:8012`.
+Use `https://vuer.ai?ws=wss://192.168.123.2:8012` for PICO if the websocket connection cannot be set.
 
    > **Note 1**: This IP must match your **Host** IP (check with `ifconfig`).
    >
@@ -361,10 +362,10 @@ In the simulation environment, the image service is automatically enabled. For p
 
    ```bash
    # SSH into PC2 and download the image service repository
-   
+
    (base) unitree@PC2:~$ cd ~
    (base) unitree@PC2:~$ git clone https://github.com/silencht/teleimager
-   
+
    # Configure the environment according to the instructions in the teleimager repository README: https://github.com/silencht/teleimager/blob/main/README.md
    ```
 
@@ -372,10 +373,10 @@ In the simulation environment, the image service is automatically enabled. For p
 
    ```bash
    # Copy the `key.pem` and `cert.pem` files configured in Section 1.1 from the **local host** `xr_teleoperate/teleop/televuer` directory to the corresponding path on PC2
-   
+
    # These two files are required by teleimager to start the WebRTC service
    (tv) unitree@Host:~$ scp ~/xr_teleoperate/teleop/televuer/key.pem ~/xr_teleoperate/teleop/televuer/cert.pem unitree@192.168.123.164:~/teleimager
-   
+
    # On PC2, configure the certificate path according to the teleimager repository README, for example:
    (teleimager) unitree@PC2:~$ cd teleimager
    (teleimager) unitree@PC2:~$ mkdir -p ~/.config/xr_teleoperate/
@@ -386,7 +387,7 @@ In the simulation environment, the image service is automatically enabled. For p
 
    ```bash
    (teleimager) unitree@PC2:~/image_server$ python -m teleimager.image_server
-   
+
    # The following command works the same way
    (teleimager) unitree@PC2:~/image_server$ teleimager-server
    ```
@@ -396,11 +397,11 @@ In the simulation environment, the image service is automatically enabled. For p
    ```bash
    (tv) unitree@Host:~$ cd ~/xr_teleoperate/teleop/teleimager/src
    (tv) unitree@Host:~/xr_teleoperate/teleop/teleimager/src$ python -m teleimager.image_client --host 192.168.123.164
-   
+
    # If the WebRTC image stream is set up, you can also open the URL [https://192.168.123.164:60001](https://192.168.123.164:60001) in a browser and click the Start button to test.
    ```
 
-   
+
 
 ## 3.2 ✋ Inspire Hand Service (optional)
 
@@ -410,7 +411,7 @@ In the simulation environment, the image service is automatically enabled. For p
 >
 > **Note 3**: For [Inspire FTP hand]((https://support.unitree.com/home/zh/G1_developer/inspire_ftp_dexterity_hand)), related issue [#48](https://github.com/unitreerobotics/xr_teleoperate/issues/48). FTP dexterous hand is now supported. Please refer to the `--ee` parameter for configuration.
 
-First, use [this URL: DFX_inspire_service](https://github.com/unitreerobotics/DFX_inspire_service) to clone the dexterous hand control interface program. And Copy it to **PC2** of  Unitree robots. 
+First, use [this URL: DFX_inspire_service](https://github.com/unitreerobotics/DFX_inspire_service) to clone the dexterous hand control interface program. And Copy it to **PC2** of  Unitree robots.
 
 On Unitree robot's **PC2**, execute command:
 
@@ -452,8 +453,8 @@ Please refer to the [Repo README](https://github.com/unitreerobotics/dex1_1_serv
 >  5. In motion mode:
 >    - Right controller **A** = Exit teleop
 >    - Both joysticks pressed = soft emergency stop (switch to damping mode)
->    - Left joystick = drive directions; 
->    - right joystick = turning; 
+>    - Left joystick = drive directions;
+>    - right joystick = turning;
 >    - max speed is limited in the code.
 
 Same as simulation but follow the safety warnings above.
@@ -510,13 +511,35 @@ xr_teleoperate/
 
 ```
 
-# 5. 🛠️ Hardware
+# 5. 🧹 Pre-commit Linting
+
+This project uses [pre-commit](https://pre-commit.com/) to automatically lint code before each commit.
+
+```bash
+# Install pre-commit hooks (one-time setup)
+pip install pre-commit
+pre-commit install
+
+# Run on all files (not just staged)
+pre-commit run --all-files
+
+# Run on specific files
+pre-commit run --files teleop/test_h2.py
+
+# Skip hooks temporarily (not recommended)
+git commit --no-verify -m "message"
+
+# Update hook versions
+pre-commit autoupdate
+```
+
+# 6. 🛠️ Hardware
 
 please see [Device document](Device.md).
 
 
 
-# 6. 🙏 Acknowledgement
+# 7. 🙏 Acknowledgement
 
 This code builds upon following open-source code-bases. Please visit the URLs to see the respective LICENSES:
 
@@ -531,7 +554,7 @@ This code builds upon following open-source code-bases. Please visit the URLs to
 9. https://github.com/unitreerobotics/unitree_sdk2_python
 10. https://github.com/ARCLab-MIT/beavr-bot
 
-# 7. 📝 Citation
+# 8. 📝 Citation
 
 ```
 @misc{xr-teleoperate,

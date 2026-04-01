@@ -1,0 +1,35 @@
+# Ruff configuration for xr_teleoperate
+
+# Target Python 3.10
+target-version = "py310"
+
+# Line length limit (default is 88)
+line-length = 120
+
+[lint]
+# Rules to ignore globally
+ignore = [
+    "E402",  # Module level import not at top of file (intentional for sys.path manipulation)
+    "E501",  # Line too long (existing codebase has many long lines)
+]
+
+# Rules to enable
+select = [
+    "E",   # pycodestyle errors
+    "F",   # Pyflakes
+    "W",   # pycodestyle warnings
+]
+
+[lint.per-file-ignores]
+# Files that need sys.path manipulation before imports
+"teleop/teleop_hand_and_arm.py" = ["E402"]
+"teleop/robot_control/robot_arm_ik.py" = ["E402", "F841"]  # F841: sol assigned but accessed via opti.value()
+"teleop/robot_control/robot_arm.py" = ["E402"]
+"teleop/test_h2.py" = ["E402"]
+
+[format]
+# Use double quotes for strings
+quote-style = "double"
+
+# Indent with spaces
+indent-style = "space"

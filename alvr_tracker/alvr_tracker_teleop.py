@@ -21,6 +21,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
 import numpy as np
+import pinocchio as pin
 import logging_mp
 
 logging_mp.basicConfig(level=logging_mp.INFO)
@@ -62,14 +63,6 @@ def on_press(key):
     elif key == "c":
         CALIBRATE = True
         logger.info("Calibrating...")
-
-
-class WristPose:
-    """Mimics the wrist pose structure from TeleVuer for IK compatibility"""
-
-    def __init__(self, position: np.ndarray, rotation: np.ndarray):
-        self.position = position
-        self.rotation = rotation
 
 
 class ALVRTeleop:
@@ -160,12 +153,18 @@ class ALVRTeleop:
         self.ref_left_rot = arm_poses["left"]["rotation"].copy()
         self.ref_right_rot = arm_poses["right"]["rotation"].copy()
 
-        # Transform to robot frame and create initial wrist poses
-        left_pos_robot, left_rot_robot = self.transform_to_robot_frame(self.ref_left_pos, self.ref_left_rot)
-        right_pos_robot, right_rot_robot = self.transform_to_robot_frame(self.ref_right_pos, self.ref_right_rot)
+        # Get current robot state to compute actual end-effector poses
+        current_lr_arm_q = self.arm_ctrl.get_current_dual_arm_q()
 
-        self.init_left_wrist_pose = WristPose(left_pos_robot, left_rot_robot)
-        self.init_right_wrist_pose = WristPose(right_pos_robot, right_rot_robot)
+        # Compute FK
+        pin.forwardKinematics(self.arm_ik.reduced_robot.model, self.arm_ik.reduced_robot.data, current_lr_arm_q)
+        pin.updateFramePlacements(self.arm_ik.reduced_robot.model, self.arm_ik.reduced_robot.data)
+
+        left_ee_se3 = self.arm_ik.reduced_robot.data.oMf[self.arm_ik.L_hand_id]
+        right_ee_se3 = self.arm_ik.reduced_robot.data.oMf[self.arm_ik.R_hand_id]
+
+        self.init_left_wrist_pose = left_ee_se3.homogeneous.copy()
+        self.init_right_wrist_pose = right_ee_se3.homogeneous.copy()
 
         logger.info("=" * 60)
         logger.info("CALIBRATION COMPLETE!")
@@ -176,7 +175,7 @@ class ALVRTeleop:
 
     def compute_wrist_poses(self, arm_poses: dict) -> tuple:
         """Compute wrist poses for IK from tracker data"""
-        if self.ref_left_pos is None:
+        if self.ref_left_pos is None or self.init_left_wrist_pose is None:
             return None, None
 
         if not arm_poses["left"]["valid"] or not arm_poses["right"]["valid"]:
@@ -205,15 +204,21 @@ class ALVRTeleop:
         _, right_rel_rot_robot = self.transform_to_robot_frame(np.zeros(3), right_rel_rot)
 
         # Apply relative motion to initial poses
-        left_target_pos = self.init_left_wrist_pose.position + left_delta_robot
-        right_target_pos = self.init_right_wrist_pose.position + right_delta_robot
+        left_target_pos = self.init_left_wrist_pose[:3, 3] + left_delta_robot
+        right_target_pos = self.init_right_wrist_pose[:3, 3] + right_delta_robot
 
-        left_target_rot = left_rel_rot_robot @ self.init_left_wrist_pose.rotation
-        right_target_rot = right_rel_rot_robot @ self.init_right_wrist_pose.rotation
+        # Apply relative rotation to initial robot poses
+        left_target_rot = left_rel_rot_robot @ self.init_left_wrist_pose[:3, :3]
+        right_target_rot = right_rel_rot_robot @ self.init_right_wrist_pose[:3, :3]
 
-        # Create wrist pose objects for IK
-        left_wrist_pose = WristPose(left_target_pos, left_target_rot)
-        right_wrist_pose = WristPose(right_target_pos, right_target_rot)
+        # Create 4x4 homogeneous matrices for IK
+        left_wrist_pose = np.eye(4)
+        left_wrist_pose[:3, :3] = left_target_rot
+        left_wrist_pose[:3, 3] = left_target_pos
+
+        right_wrist_pose = np.eye(4)
+        right_wrist_pose[:3, :3] = right_target_rot
+        right_wrist_pose[:3, 3] = right_target_pos
 
         return left_wrist_pose, right_wrist_pose
 

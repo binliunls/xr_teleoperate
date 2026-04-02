@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-ALVR Motion Tracker Teleoperation
+ALVR Wrist Tracker Teleoperation
 
-Control the robot using PICO Motion Trackers streamed via ALVR.
+Control the robot arms using PICO wrist Motion Trackers streamed via ALVR.
+The wrist trackers appear as "VRLink Hand Tracker" devices in SteamVR/OpenVR.
 
 Usage:
     python alvr_tracker_teleop.py --arm=H2
-    python alvr_tracker_teleop.py --arm=H2 --visualize
 """
 
 import argparse
 import time
 import sys
 import os
+import threading
 
 # Add parent directory to path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -34,7 +35,13 @@ from teleop.robot_control.robot_arm import (
     H1_ArmController,
     H2_ArmController,
 )
-from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK
+from teleop.robot_control.robot_arm_ik import (
+    G1_29_ArmIK,
+    G1_23_ArmIK,
+    H1_2_ArmIK,
+    H1_ArmIK,
+    H2_ArmIK,
+)
 from sshkeyboard import listen_keyboard, stop_listening
 
 # State variables
@@ -57,8 +64,16 @@ def on_press(key):
         logger.info("Calibrating...")
 
 
+class WristPose:
+    """Mimics the wrist pose structure from TeleVuer for IK compatibility"""
+
+    def __init__(self, position: np.ndarray, rotation: np.ndarray):
+        self.position = position
+        self.rotation = rotation
+
+
 class ALVRTeleop:
-    """Teleoperation using ALVR Motion Trackers"""
+    """Teleoperation using ALVR wrist Motion Trackers (VRLink Hand Trackers)"""
 
     def __init__(self, args):
         self.args = args
@@ -82,31 +97,29 @@ class ALVRTeleop:
 
         controller_cls, ik_cls = arm_controllers[args.arm]
         self.arm_ik = ik_cls()
-        self.robot = controller_cls()
+        self.arm_ctrl = controller_cls()
         logger.info(f"Robot {args.arm} initialized")
 
         # Initialize ALVR tracker bridge
         self.tracker_bridge = ALVRTrackerBridge()
 
-        # Calibration data
+        # Calibration data (reference poses when calibration is triggered)
         self.ref_left_pos = None
         self.ref_right_pos = None
         self.ref_left_rot = None
         self.ref_right_rot = None
 
-        # Robot initial pose
-        self.robot_init_left_pos = None
-        self.robot_init_right_pos = None
-        self.robot_init_left_rot = None
-        self.robot_init_right_rot = None
+        # Initial wrist poses (captured at calibration for relative motion)
+        self.init_left_wrist_pose = None
+        self.init_right_wrist_pose = None
 
         # Scaling
         self.position_scale = args.position_scale
 
-        # Coordinate transform (OpenVR to Robot)
+        # Coordinate transform (OpenVR to Robot frame)
         # OpenVR: Y-up, -Z forward
-        # Robot: Z-up, X forward (adjust as needed)
-        self.R_robot_openvr = np.array([[0, 0, -1], [-1, 0, 0], [0, 1, 0]])
+        # Robot: Z-up, X forward (adjust based on your robot setup)
+        self.R_openvr_to_robot = np.array([[0, 0, -1], [-1, 0, 0], [0, 1, 0]])
 
     def initialize(self) -> bool:
         """Initialize the tracker bridge"""
@@ -119,85 +132,88 @@ class ALVRTeleop:
     def shutdown(self):
         """Cleanup"""
         self.tracker_bridge.shutdown()
-        self.robot.ctrl_dual_arm_go_home()
+        self.arm_ctrl.ctrl_dual_arm_go_home()
         logger.info("Shutdown complete")
 
-    def calibrate(self):
+    def transform_to_robot_frame(self, position: np.ndarray, rotation: np.ndarray) -> tuple:
+        """Transform from OpenVR to robot coordinate frame"""
+        robot_pos = self.R_openvr_to_robot @ position
+        robot_rot = self.R_openvr_to_robot @ rotation @ self.R_openvr_to_robot.T
+        return robot_pos, robot_rot
+
+    def calibrate(self, arm_poses: dict) -> bool:
         """Capture current tracker positions as reference"""
         global CALIBRATE
         CALIBRATE = False
 
-        trackers = self.tracker_bridge.get_all_valid_trackers()
-
-        if len(trackers) < 2:
-            logger.warning("Need at least 2 trackers for calibration")
+        if not arm_poses["left"]["valid"] or not arm_poses["right"]["valid"]:
+            logger.warning("Need both wrist trackers for calibration")
+            if not arm_poses["left"]["valid"]:
+                logger.warning("  Left wrist tracker not detected")
+            if not arm_poses["right"]["valid"]:
+                logger.warning("  Right wrist tracker not detected")
             return False
 
-        # Assume first two trackers are left and right wrists
-        # TODO: Better tracker assignment based on position
-        left_tracker = trackers[0]
-        right_tracker = trackers[1] if len(trackers) > 1 else trackers[0]
+        # Store reference positions in OpenVR frame
+        self.ref_left_pos = arm_poses["left"]["position"].copy()
+        self.ref_right_pos = arm_poses["right"]["position"].copy()
+        self.ref_left_rot = arm_poses["left"]["rotation"].copy()
+        self.ref_right_rot = arm_poses["right"]["rotation"].copy()
 
-        self.ref_left_pos = left_tracker.position.copy()
-        self.ref_right_pos = right_tracker.position.copy()
-        self.ref_left_rot = left_tracker.rotation.copy()
-        self.ref_right_rot = right_tracker.rotation.copy()
+        # Transform to robot frame and create initial wrist poses
+        left_pos_robot, left_rot_robot = self.transform_to_robot_frame(self.ref_left_pos, self.ref_left_rot)
+        right_pos_robot, right_rot_robot = self.transform_to_robot_frame(self.ref_right_pos, self.ref_right_rot)
 
-        # Get robot initial pose
-        self.robot_init_left_pos, self.robot_init_left_rot = self.arm_ik.get_init_ee_pose("left")
-        self.robot_init_right_pos, self.robot_init_right_rot = self.arm_ik.get_init_ee_pose("right")
+        self.init_left_wrist_pose = WristPose(left_pos_robot, left_rot_robot)
+        self.init_right_wrist_pose = WristPose(right_pos_robot, right_rot_robot)
 
         logger.info("Calibration complete!")
-        logger.info(f"  Left ref: {self.ref_left_pos}")
-        logger.info(f"  Right ref: {self.ref_right_pos}")
+        logger.info(f"  Left wrist ref (OpenVR): {self.ref_left_pos}")
+        logger.info(f"  Right wrist ref (OpenVR): {self.ref_right_pos}")
         return True
 
-    def transform_to_robot_frame(self, position: np.ndarray, rotation: np.ndarray) -> tuple:
-        """Transform from OpenVR to robot coordinate frame"""
-        robot_pos = self.R_robot_openvr @ position
-        robot_rot = self.R_robot_openvr @ rotation @ self.R_robot_openvr.T
-        return robot_pos, robot_rot
-
-    def compute_robot_target(self, trackers: list) -> tuple:
-        """Compute robot target positions from tracker data"""
+    def compute_wrist_poses(self, arm_poses: dict) -> tuple:
+        """Compute wrist poses for IK from tracker data"""
         if self.ref_left_pos is None:
-            return None, None, None, None
+            return None, None
 
-        if len(trackers) < 2:
-            return None, None, None, None
+        if not arm_poses["left"]["valid"] or not arm_poses["right"]["valid"]:
+            return None, None
 
-        left_tracker = trackers[0]
-        right_tracker = trackers[1]
+        # Get current tracker positions
+        left_pos = arm_poses["left"]["position"]
+        left_rot = arm_poses["left"]["rotation"]
+        right_pos = arm_poses["right"]["position"]
+        right_rot = arm_poses["right"]["rotation"]
 
-        # Compute relative motion from reference
-        left_delta = left_tracker.position - self.ref_left_pos
-        right_delta = right_tracker.position - self.ref_right_pos
+        # Compute relative motion from reference (in OpenVR frame)
+        left_delta = (left_pos - self.ref_left_pos) * self.position_scale
+        right_delta = (right_pos - self.ref_right_pos) * self.position_scale
 
-        # Transform to robot frame
+        # Transform delta to robot frame
         left_delta_robot, _ = self.transform_to_robot_frame(left_delta, np.eye(3))
         right_delta_robot, _ = self.transform_to_robot_frame(right_delta, np.eye(3))
 
-        # Scale
-        left_delta_robot *= self.position_scale
-        right_delta_robot *= self.position_scale
+        # Compute relative rotation from reference
+        left_rel_rot = left_rot @ self.ref_left_rot.T
+        right_rel_rot = right_rot @ self.ref_right_rot.T
 
-        # Add to robot initial position
-        left_target_pos = self.robot_init_left_pos + left_delta_robot
-        right_target_pos = self.robot_init_right_pos + right_delta_robot
+        # Transform rotations to robot frame
+        _, left_rel_rot_robot = self.transform_to_robot_frame(np.zeros(3), left_rel_rot)
+        _, right_rel_rot_robot = self.transform_to_robot_frame(np.zeros(3), right_rel_rot)
 
-        # Compute rotation (relative rotation from reference)
-        left_rel_rot = left_tracker.rotation @ self.ref_left_rot.T
-        right_rel_rot = right_tracker.rotation @ self.ref_right_rot.T
+        # Apply relative motion to initial poses
+        left_target_pos = self.init_left_wrist_pose.position + left_delta_robot
+        right_target_pos = self.init_right_wrist_pose.position + right_delta_robot
 
-        # Transform rotations
-        _, left_target_rot = self.transform_to_robot_frame(np.zeros(3), left_rel_rot)
-        _, right_target_rot = self.transform_to_robot_frame(np.zeros(3), right_rel_rot)
+        left_target_rot = left_rel_rot_robot @ self.init_left_wrist_pose.rotation
+        right_target_rot = right_rel_rot_robot @ self.init_right_wrist_pose.rotation
 
-        # Apply to robot initial rotation
-        left_target_rot = left_target_rot @ self.robot_init_left_rot
-        right_target_rot = right_target_rot @ self.robot_init_right_rot
+        # Create wrist pose objects for IK
+        left_wrist_pose = WristPose(left_target_pos, left_target_rot)
+        right_wrist_pose = WristPose(right_target_pos, right_target_rot)
 
-        return left_target_pos, left_target_rot, right_target_pos, right_target_rot
+        return left_wrist_pose, right_wrist_pose
 
     def run(self):
         """Main control loop"""
@@ -206,18 +222,27 @@ class ALVRTeleop:
         if not self.initialize():
             return
 
-        # Start keyboard listener
-        listen_keyboard(on_press=on_press, sequential=True, delay_second_char=0.05)
+        # Start keyboard listener in a thread
+        listen_keyboard_thread = threading.Thread(
+            target=listen_keyboard,
+            kwargs={
+                "on_press": on_press,
+                "until": None,
+                "sequential": False,
+            },
+            daemon=True,
+        )
+        listen_keyboard_thread.start()
 
         logger.info("-" * 60)
-        logger.info("ALVR Motion Tracker Teleoperation")
+        logger.info("ALVR Wrist Tracker Teleoperation")
         logger.info("-" * 60)
         logger.info("Controls:")
         logger.info("  [r] - Start tracking")
         logger.info("  [c] - Calibrate (capture reference pose)")
         logger.info("  [q] - Quit")
         logger.info("-" * 60)
-        logger.info("Waiting for trackers...")
+        logger.info("Waiting for wrist trackers (VRLink Hand Trackers)...")
 
         period = 1.0 / self.frequency
         calibrated = False
@@ -228,39 +253,61 @@ class ALVRTeleop:
 
                 # Update tracker data
                 self.tracker_bridge.update()
-                trackers = self.tracker_bridge.get_all_valid_trackers()
+                arm_poses = self.tracker_bridge.get_arm_poses()
+
+                # Check tracker status
+                left_valid = arm_poses["left"]["valid"]
+                right_valid = arm_poses["right"]["valid"]
+                both_valid = left_valid and right_valid
 
                 # Handle calibration request
                 if CALIBRATE:
-                    if self.calibrate():
+                    if self.calibrate(arm_poses):
                         calibrated = True
 
                 # Control robot if started and calibrated
                 if START and calibrated:
-                    if len(trackers) >= 2:
-                        # Compute targets
-                        left_pos, left_rot, right_pos, right_rot = self.compute_robot_target(trackers)
+                    if both_valid:
+                        # Compute wrist poses
+                        left_wrist_pose, right_wrist_pose = self.compute_wrist_poses(arm_poses)
 
-                        if left_pos is not None:
-                            # Solve IK
-                            left_q = self.arm_ik.solve_ik(left_pos, left_rot, "left")
-                            right_q = self.arm_ik.solve_ik(right_pos, right_rot, "right")
+                        if left_wrist_pose is not None:
+                            # Get current robot state
+                            current_lr_arm_q = self.arm_ctrl.get_current_dual_arm_q()
+                            current_lr_arm_dq = self.arm_ctrl.get_current_dual_arm_dq()
+
+                            # Solve IK (same interface as teleop_hand_and_arm.py)
+                            sol_q, sol_tauff = self.arm_ik.solve_ik(
+                                left_wrist_pose,
+                                right_wrist_pose,
+                                current_lr_arm_q,
+                                current_lr_arm_dq,
+                            )
 
                             # Send to robot
-                            if left_q is not None and right_q is not None:
-                                self.robot.ctrl_dual_arm(left_q, right_q)
+                            self.arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
                     else:
                         # Print status occasionally
                         if int(time.time() * 2) % 2 == 0:
-                            logger.warning(f"Only {len(trackers)} tracker(s) detected")
+                            status = []
+                            if not left_valid:
+                                status.append("LEFT missing")
+                            if not right_valid:
+                                status.append("RIGHT missing")
+                            logger.warning(f"Wrist tracker issue: {', '.join(status)}")
 
                 elif START and not calibrated:
                     logger.info("Press [c] to calibrate first!")
                     START = False
 
                 # Status display
-                if len(trackers) > 0 and not START:
-                    print(f"\rTrackers: {len(trackers)} | Press [c] to calibrate, [r] to start", end="")
+                if not START:
+                    left_status = "OK" if left_valid else "MISSING"
+                    right_status = "OK" if right_valid else "MISSING"
+                    print(
+                        f"\rWrist trackers - L:{left_status} R:{right_status} | [c]=calibrate [r]=start",
+                        end="",
+                    )
 
                 # Maintain loop frequency
                 elapsed = time.time() - loop_start
@@ -276,14 +323,17 @@ class ALVRTeleop:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ALVR Motion Tracker Teleoperation")
+    parser = argparse.ArgumentParser(description="ALVR Wrist Tracker Teleoperation")
     parser.add_argument(
-        "--arm", type=str, choices=["G1_29", "G1_23", "H1_2", "H1", "H2"], default="H2", help="Robot arm type"
+        "--arm",
+        type=str,
+        choices=["G1_29", "G1_23", "H1_2", "H1", "H2"],
+        default="H2",
+        help="Robot arm type",
     )
     parser.add_argument("--frequency", type=float, default=30.0, help="Control frequency in Hz")
     parser.add_argument("--network-interface", type=str, default=None, help="Network interface for DDS")
     parser.add_argument("--position-scale", type=float, default=1.0, help="Scale factor for position movements")
-    parser.add_argument("--visualize", action="store_true", help="Enable Rerun visualization")
 
     args = parser.parse_args()
 

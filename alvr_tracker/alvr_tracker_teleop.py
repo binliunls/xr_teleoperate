@@ -167,9 +167,11 @@ class ALVRTeleop:
         self.init_left_wrist_pose = WristPose(left_pos_robot, left_rot_robot)
         self.init_right_wrist_pose = WristPose(right_pos_robot, right_rot_robot)
 
-        logger.info("Calibration complete!")
-        logger.info(f"  Left wrist ref (OpenVR): {self.ref_left_pos}")
-        logger.info(f"  Right wrist ref (OpenVR): {self.ref_right_pos}")
+        logger.info("=" * 60)
+        logger.info("CALIBRATION COMPLETE!")
+        logger.info("  Your current arm position is now the reference.")
+        logger.info("  Press [r] to start - robot will follow your movements.")
+        logger.info("=" * 60)
         return True
 
     def compute_wrist_poses(self, arm_poses: dict) -> tuple:
@@ -238,9 +240,14 @@ class ALVRTeleop:
         logger.info("ALVR Wrist Tracker Teleoperation")
         logger.info("-" * 60)
         logger.info("Controls:")
-        logger.info("  [r] - Start tracking")
-        logger.info("  [c] - Calibrate (capture reference pose)")
+        logger.info("  [c] - Calibrate (MUST do first!)")
+        logger.info("  [r] - Start tracking (after calibration)")
         logger.info("  [q] - Quit")
+        logger.info("-" * 60)
+        logger.info("CALIBRATION INSTRUCTIONS:")
+        logger.info("  1. Position your arms to match robot's home pose")
+        logger.info("  2. Hold still and press [c] to calibrate")
+        logger.info("  3. Then press [r] to start - robot follows your motion")
         logger.info("-" * 60)
         logger.info("Waiting for wrist trackers (VRLink Hand Trackers)...")
 

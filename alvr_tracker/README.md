@@ -180,6 +180,59 @@ Expected output for wrist trackers:
 python alvr_tracker_teleop.py --arm=H2
 ```
 
+## Teleoperation Workflow
+
+### Controls
+
+| Key | Action |
+|-----|--------|
+| `[c]` | Calibrate (capture reference pose) - **MUST do first!** |
+| `[r]` | Start tracking (after calibration) |
+| `[q]` | Quit and return robot to home |
+
+### Step-by-Step
+
+1. **Wait for trackers** - Script shows: `Wrist trackers - L:OK R:OK`
+
+2. **Get in position:**
+   - Stand where you want to control from
+   - Put your arms in a pose that **matches the robot's home/starting position**
+   - Hold still
+
+3. **Press [c] to calibrate** - You'll see:
+   ```
+   ============================================================
+   CALIBRATION COMPLETE!
+     Your current arm position is now the reference.
+     Press [r] to start - robot will follow your movements.
+   ============================================================
+   ```
+
+4. **Press [r] to start** - Robot follows your arm movements
+   - Move your arms → robot arms move the same relative amount
+   - Your calibration position = robot's home position
+
+5. **Press [q] to quit** - Robot returns to home position
+
+### Tips
+
+- **If tracking feels off:** Press `[q]` to stop, reposition your arms, and calibrate again
+- **Keep movements smooth:** Sudden jerks may cause IK issues
+- **Scale movements:** Use `--position-scale 0.5` for half-size movements (useful for large workspaces)
+
+### Command Line Options
+
+```bash
+python alvr_tracker_teleop.py --arm=H2 --frequency=30 --position-scale=1.0
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--arm` | H2 | Robot type: G1_29, G1_23, H1_2, H1, H2 |
+| `--frequency` | 30.0 | Control loop frequency in Hz |
+| `--position-scale` | 1.0 | Scale factor for movements |
+| `--network-interface` | None | Network interface for DDS |
+
 ## Troubleshooting
 
 ### ALVR says "SteamVR Linux Files missing"

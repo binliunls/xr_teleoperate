@@ -392,16 +392,26 @@ if __name__ == "__main__":
             )
 
         logger_mp.info("----------------------------------------------------------------")
-        logger_mp.info("🟢  Press [r] to start syncing the robot with your movements.")
+        logger_mp.info("🟢  Press [r] on keyboard or [B button] on right controller to start syncing.")
         if args.record:
             logger_mp.info("🟡  Press [s] to START or SAVE recording (toggle cycle).")
         else:
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
-        logger_mp.info("🔴  Press [q] to stop and exit the program.")
+        logger_mp.info("🔴  Press [q] on keyboard or [A button] on right controller to stop and exit.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True  # now ready to (1) enter START state
         while not START and not STOP:  # wait for start or stop signal.
             time.sleep(0.033)
+
+            # Allow using VR controller to start/stop
+            if args.input_mode == "controller":
+                tele_data = tv_wrapper.get_tele_data()
+                if tele_data.right_ctrl_bButton:
+                    START = True
+                elif tele_data.right_ctrl_aButton:
+                    START = False
+                    STOP = True
+
             if args.arm != "H2" and camera_config["head_camera"]["enable_zmq"] and xr_need_local_img:
                 head_img = img_client.get_head_frame()
                 tv_wrapper.render_to_xr(head_img)
@@ -466,20 +476,22 @@ if __name__ == "__main__":
                 pass
 
             # high level control
-            if args.input_mode == "controller" and args.motion:
+            if args.input_mode == "controller":
                 # quit teleoperate
                 if tele_data.right_ctrl_aButton:
                     START = False
                     STOP = True
-                # command robot to enter damping mode. soft emergency stop function
-                if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
-                    loco_wrapper.Damp()
-                # https://github.com/unitreerobotics/xr_teleoperate/issues/135, control, limit velocity to within 0.3
-                loco_wrapper.Move(
-                    -tele_data.left_ctrl_thumbstickValue[1] * 0.3,
-                    -tele_data.left_ctrl_thumbstickValue[0] * 0.3,
-                    -tele_data.right_ctrl_thumbstickValue[0] * 0.3,
-                )
+
+                if args.motion:
+                    # command robot to enter damping mode. soft emergency stop function
+                    if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
+                        loco_wrapper.Damp()
+                    # https://github.com/unitreerobotics/xr_teleoperate/issues/135, control, limit velocity to within 0.3
+                    loco_wrapper.Move(
+                        -tele_data.left_ctrl_thumbstickValue[1] * 0.3,
+                        -tele_data.left_ctrl_thumbstickValue[0] * 0.3,
+                        -tele_data.right_ctrl_thumbstickValue[0] * 0.3,
+                    )
 
             # get current robot state data.
             current_lr_arm_q = arm_ctrl.get_current_dual_arm_q()

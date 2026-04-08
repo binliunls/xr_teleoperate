@@ -98,7 +98,7 @@ if __name__ == "__main__":
         "--input-mode",
         type=str,
         choices=["hand", "controller"],
-        default="hand",
+        default="controller",
         help="Select XR device input tracking source",
     )
     parser.add_argument(
@@ -112,7 +112,7 @@ if __name__ == "__main__":
         "--arm",
         type=str,
         choices=["G1_29", "G1_23", "H1_2", "H1", "H2"],
-        default="G1_29",
+        default="H2",
         help="Select arm controller",
     )
     parser.add_argument(

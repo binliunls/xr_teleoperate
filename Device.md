@@ -287,13 +287,13 @@
         <td align="center">
             <p align="center">
                 <img src="./img/real_left_hand.jpg" alt="wrist" width="50%">
-                <figcaption>Assembly Left Hand</figcaption>
+                <figcaption>Assembly Right Hand</figcaption>
             </p>
         </td>
         <td align="center">
             <p align="center">
                 <img src="./img/real_right_hand.jpg" alt="wrist" width="50%">
-                <figcaption>Assembly Right Hand</figcaption>
+                <figcaption>Assembly Left Hand</figcaption>
             </p>
         </td>
     </tr>

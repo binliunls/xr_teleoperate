@@ -288,13 +288,13 @@
         <td align="center">
             <p align="center">
                 <img src="./img/real_left_hand.jpg" alt="wrist" width="50%">
-                <figcaption>装配左手</figcaption>
+                <figcaption>装配右手</figcaption>
             </p>
         </td>
         <td align="center">
             <p align="center">
                 <img src="./img/real_right_hand.jpg" alt="wrist" width="50%">
-                <figcaption>装配右手</figcaption>
+                <figcaption>装配左手</figcaption>
             </p>
         </td>
     </tr>

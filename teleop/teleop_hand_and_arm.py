@@ -124,7 +124,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--img-server-ip",
         type=str,
-        default="192.168.123.164",
+        default="192.168.124.162",
         help="IP address of image server, used by teleimager and televuer",
     )
     parser.add_argument(
@@ -203,28 +203,10 @@ if __name__ == "__main__":
             listen_keyboard_thread.start()
 
         # image client
-        if args.arm == "H2":
-            # H2 does not use cameras
-            img_client = None
-            camera_config = {
-                "head_camera": {
-                    "enable_zmq": False,
-                    "enable_webrtc": False,
-                    "binocular": False,
-                    "image_shape": (480, 640),
-                    "webrtc_port": 8889,
-                },
-                "left_wrist_camera": {"enable_zmq": False},
-                "right_wrist_camera": {"enable_zmq": False},
-            }
-            xr_need_local_img = False
-        else:
-            img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
-            camera_config = img_client.get_cam_config()
-            logger_mp.debug(f"Camera config: {camera_config}")
-            xr_need_local_img = not (
-                args.display_mode == "pass-through" or camera_config["head_camera"]["enable_webrtc"]
-            )
+        img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
+        camera_config = img_client.get_cam_config()
+        logger_mp.debug(f"Camera config: {camera_config}")
+        xr_need_local_img = not (args.display_mode == "pass-through" or camera_config["head_camera"]["enable_webrtc"])
 
         # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
         tv_wrapper = TeleVuerWrapper(
@@ -394,7 +376,9 @@ if __name__ == "__main__":
         logger_mp.info("----------------------------------------------------------------")
         logger_mp.info("🟢  Press [r] on keyboard or [B button] on right controller to start syncing.")
         if args.record:
-            logger_mp.info("🟡  Press [s] to START or SAVE recording (toggle cycle).")
+            logger_mp.info(
+                "🟡  Press [s] on keyboard or [Y button] on right controller to START or SAVE recording (toggle cycle)."
+            )
         else:
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
         logger_mp.info("🔴  Press [q] on keyboard or [A button] on right controller to stop and exit.")
@@ -412,13 +396,14 @@ if __name__ == "__main__":
                     START = False
                     STOP = True
 
-            if args.arm != "H2" and camera_config["head_camera"]["enable_zmq"] and xr_need_local_img:
+            if camera_config["head_camera"]["enable_zmq"] and xr_need_local_img:
                 head_img = img_client.get_head_frame()
                 tv_wrapper.render_to_xr(head_img)
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
 
+        prev_y_button = False  # for edge detection on Y button
         head_img = None
         left_wrist_img = None
         right_wrist_img = None
@@ -427,15 +412,15 @@ if __name__ == "__main__":
         while not STOP:
             start_time = time.time()
             # get image
-            if args.arm != "H2" and camera_config["head_camera"]["enable_zmq"]:
+            if camera_config["head_camera"]["enable_zmq"]:
                 if args.record or xr_need_local_img:
                     head_img = img_client.get_head_frame()
                 if xr_need_local_img:
                     tv_wrapper.render_to_xr(head_img)
-            if args.arm != "H2" and camera_config["left_wrist_camera"]["enable_zmq"]:
+            if camera_config["left_wrist_camera"]["enable_zmq"]:
                 if args.record:
                     left_wrist_img = img_client.get_left_wrist_frame()
-            if args.arm != "H2" and camera_config["right_wrist_camera"]["enable_zmq"]:
+            if camera_config["right_wrist_camera"]["enable_zmq"]:
                 if args.record:
                     right_wrist_img = img_client.get_right_wrist_frame()
 
@@ -481,6 +466,12 @@ if __name__ == "__main__":
                 if tele_data.right_ctrl_aButton:
                     START = False
                     STOP = True
+
+                # toggle recording on rising edge of Y button (press, not hold)
+                y_button = tele_data.left_ctrl_bButton
+                if args.record and y_button and not prev_y_button:
+                    RECORD_TOGGLE = True
+                prev_y_button = y_button
 
                 if args.motion:
                     # command robot to enter damping mode. soft emergency stop function
@@ -567,7 +558,7 @@ if __name__ == "__main__":
                 if RECORD_RUNNING:
                     colors = {}
                     depths = {}
-                    if args.arm != "H2" and camera_config["head_camera"]["binocular"]:
+                    if camera_config["head_camera"]["binocular"]:
                         if camera_config["head_camera"]["enable_zmq"]:
                             if head_img is not None:
                                 colors[f"color_{0}"] = head_img.bgr[
@@ -590,10 +581,10 @@ if __name__ == "__main__":
                                 colors[f"color_{3}"] = right_wrist_img.bgr
                             else:
                                 logger_mp.warning("Right wrist image is None!")
-                    elif args.arm != "H2":
+                    else:
                         if camera_config["head_camera"]["enable_zmq"]:
                             if head_img is not None:
-                                colors[f"color_{0}"] = head_img
+                                colors[f"color_{0}"] = head_img.bgr
                             else:
                                 logger_mp.warning("Head image is None!")
                         if camera_config["left_wrist_camera"]["enable_zmq"]:

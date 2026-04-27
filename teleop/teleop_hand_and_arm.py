@@ -118,8 +118,27 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ee",
         type=str,
-        choices=["dex1", "dex3", "inspire_ftp", "inspire_dfx", "brainco"],
+        choices=["dex1", "dex3", "inspire_ftp", "inspire_dfx", "brainco", "sharpa"],
         help="Select end effector controller",
+    )
+    parser.add_argument(
+        "--sharpa-input",
+        type=str,
+        choices=["hand", "manus"],
+        default="hand",
+        help="Sharpa input source: 'hand' (XR hand-tracking + dex-retargeting) or 'manus' (pre-retargeted joint angles from Manus glove client).",
+    )
+    parser.add_argument(
+        "--sharpa-mount",
+        type=str,
+        choices=["flange", "wrist"],
+        default="flange",
+        help="Sharpa URDF root variant: 'flange' for arm-flange mount (H2 default), 'wrist' to use the wrist housing as the root.",
+    )
+    parser.add_argument(
+        "--record-tactile",
+        action="store_true",
+        help="Include Sharpa tactile (5x F6 per hand) in recorded episodes.",
     )
     parser.add_argument(
         "--img-server-ip",
@@ -349,6 +368,36 @@ if __name__ == "__main__":
                 dual_hand_action_array,
                 simulation_mode=args.sim,
             )
+        elif args.ee == "sharpa":
+            from teleop.robot_control.robot_hand_sharpa import (
+                SharpaWave_Controller, SHARPA_DOF, SHARPA_TACTILE_PER_HAND,
+            )
+
+            # Input array shape depends on Sharpa input mode.
+            #   hand  → 25×3 XR keypoints flattened (75 floats / hand)
+            #   manus → 22 pre-retargeted joint angles (radians)
+            _sharpa_in_size = 75 if args.sharpa_input == "hand" else SHARPA_DOF
+            left_hand_pos_array = Array("d", _sharpa_in_size, lock=True)   # [input]
+            right_hand_pos_array = Array("d", _sharpa_in_size, lock=True)  # [input]
+            dual_hand_data_lock = Lock()
+            dual_hand_state_array = Array("d", 2 * SHARPA_DOF, lock=False)   # 44 floats
+            dual_hand_action_array = Array("d", 2 * SHARPA_DOF, lock=False)  # 44 floats
+            dual_hand_tactile_array = (
+                Array("d", 2 * SHARPA_TACTILE_PER_HAND, lock=False)          # 60 floats
+                if args.record_tactile else None
+            )
+            hand_ctrl = SharpaWave_Controller(
+                left_hand_pos_array,
+                right_hand_pos_array,
+                dual_hand_data_lock=dual_hand_data_lock,
+                dual_hand_state_array=dual_hand_state_array,
+                dual_hand_action_array=dual_hand_action_array,
+                dual_hand_tactile_array=dual_hand_tactile_array,
+                input_mode=args.sharpa_input,
+                mount_variant=args.sharpa_mount,
+                fps=args.frequency,
+                simulation_mode=args.sim,
+            )
         else:
             pass
 
@@ -390,6 +439,24 @@ if __name__ == "__main__":
                 frequency=args.frequency,
                 rerun_log=not args.headless,
             )
+
+            # End-effector joint / tactile metadata
+            if args.ee == "sharpa":
+                _sharpa_left_joint_names = [
+                    "left_thumb_CMC_FE",  "left_thumb_CMC_AA",  "left_thumb_MCP_FE",  "left_thumb_MCP_AA",  "left_thumb_IP",
+                    "left_index_MCP_FE",  "left_index_MCP_AA",  "left_index_PIP",     "left_index_DIP",
+                    "left_middle_MCP_FE", "left_middle_MCP_AA", "left_middle_PIP",    "left_middle_DIP",
+                    "left_ring_MCP_FE",   "left_ring_MCP_AA",   "left_ring_PIP",      "left_ring_DIP",
+                    "left_pinky_CMC",     "left_pinky_MCP_FE",  "left_pinky_MCP_AA",  "left_pinky_PIP",   "left_pinky_DIP",
+                ]
+                _sharpa_right_joint_names = [n.replace("left_", "right_") for n in _sharpa_left_joint_names]
+                _sharpa_tactile_names = ["thumb", "index", "middle", "ring", "pinky"] if args.record_tactile else None
+                recorder.set_ee_metadata(
+                    left_joint_names=_sharpa_left_joint_names,
+                    right_joint_names=_sharpa_right_joint_names,
+                    left_tactile_names=_sharpa_tactile_names,
+                    right_tactile_names=_sharpa_tactile_names,
+                )
 
         logger_mp.info("----------------------------------------------------------------")
         logger_mp.info("🟢  Press [r] on keyboard or [B button] on right controller to start syncing.")
@@ -462,6 +529,15 @@ if __name__ == "__main__":
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
                 with right_hand_pos_array.get_lock():
                     right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
+            elif args.ee == "sharpa" and args.sharpa_input == "hand" and args.input_mode == "hand":
+                with left_hand_pos_array.get_lock():
+                    left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
+                with right_hand_pos_array.get_lock():
+                    right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
+            elif args.ee == "sharpa" and args.sharpa_input == "manus":
+                # Manus client should populate left_hand_pos_array / right_hand_pos_array
+                # with 22 retargeted joint angles (radians) on its own.
+                pass
             elif args.ee == "dex1" and args.input_mode == "controller":
                 with left_gripper_value.get_lock():
                     left_gripper_value.value = tele_data.left_ctrl_triggerValue
@@ -549,6 +625,20 @@ if __name__ == "__main__":
                         right_ee_state = dual_hand_state_array[-6:]
                         left_hand_action = dual_hand_action_array[:6]
                         right_hand_action = dual_hand_action_array[-6:]
+                        current_body_state = []
+                        current_body_action = []
+                elif args.ee == "sharpa":
+                    with dual_hand_data_lock:
+                        left_ee_state = list(dual_hand_state_array[:SHARPA_DOF])
+                        right_ee_state = list(dual_hand_state_array[-SHARPA_DOF:])
+                        left_hand_action = list(dual_hand_action_array[:SHARPA_DOF])
+                        right_hand_action = list(dual_hand_action_array[-SHARPA_DOF:])
+                        if args.record_tactile and dual_hand_tactile_array is not None:
+                            sharpa_left_tactile = list(dual_hand_tactile_array[:SHARPA_TACTILE_PER_HAND])
+                            sharpa_right_tactile = list(dual_hand_tactile_array[-SHARPA_TACTILE_PER_HAND:])
+                        else:
+                            sharpa_left_tactile = None
+                            sharpa_right_tactile = None
                         current_body_state = []
                         current_body_action = []
                 else:
@@ -656,6 +746,14 @@ if __name__ == "__main__":
                             "qpos": current_body_action,
                         },
                     }
+                    # Optional Sharpa tactile block: 5 channels × F6 per hand.
+                    tactiles = None
+                    if args.ee == "sharpa" and args.record_tactile and sharpa_left_tactile is not None:
+                        tactiles = {
+                            "left_ee":  {"f6": sharpa_left_tactile},
+                            "right_ee": {"f6": sharpa_right_tactile},
+                        }
+
                     if args.sim:
                         sim_state = sim_state_subscriber.read_data()
                         recorder.add_item(
@@ -663,10 +761,14 @@ if __name__ == "__main__":
                             depths=depths,
                             states=states,
                             actions=actions,
+                            tactiles=tactiles,
                             sim_state=sim_state,
                         )
                     else:
-                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions)
+                        recorder.add_item(
+                            colors=colors, depths=depths,
+                            states=states, actions=actions, tactiles=tactiles,
+                        )
 
             current_time = time.time()
             time_elapsed = current_time - start_time

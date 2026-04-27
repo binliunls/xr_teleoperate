@@ -87,6 +87,18 @@ class EpisodeWriter():
             }
 
  
+    def set_ee_metadata(self, left_joint_names=None, right_joint_names=None,
+                        left_tactile_names=None, right_tactile_names=None):
+        """Populate end-effector joint / tactile names in info before recording starts."""
+        if left_joint_names is not None:
+            self.info["joint_names"]["left_ee"] = list(left_joint_names)
+        if right_joint_names is not None:
+            self.info["joint_names"]["right_ee"] = list(right_joint_names)
+        if left_tactile_names is not None:
+            self.info["tactile_names"]["left_ee"] = list(left_tactile_names)
+        if right_tactile_names is not None:
+            self.info["tactile_names"]["right_ee"] = list(right_tactile_names)
+
     def create_episode(self):
         """
         Create a new episode.

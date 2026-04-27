@@ -90,7 +90,12 @@ class ALVRTeleop:
 
         controller_cls, ik_cls = arm_controllers[args.arm]
         self.arm_ik = ik_cls()
-        self.arm_ctrl = controller_cls()
+        self.arm_ctrl = controller_cls(
+            kp_low=args.kp,
+            kp_wrist=args.kp_wrist,
+            kd_low=args.kd,
+            kd_wrist=args.kd_wrist,
+        )
         logger.info(f"Robot {args.arm} initialized")
 
         # Initialize ALVR tracker bridge
@@ -345,7 +350,11 @@ def main():
     )
     parser.add_argument("--frequency", type=float, default=30.0, help="Control frequency in Hz")
     parser.add_argument("--network-interface", type=str, default=None, help="Network interface for DDS")
-    parser.add_argument("--position-scale", type=float, default=1.0, help="Scale factor for position movements")
+    parser.add_argument("--position-scale", type=float, default=0.8, help="Scale factor for position movements")
+    parser.add_argument("--kp", type=float, default=None, help="Kp gain for arm motors (default: 80)")
+    parser.add_argument("--kp-wrist", type=float, default=None, help="Kp gain for wrist motors (default: 40)")
+    parser.add_argument("--kd", type=float, default=None, help="Kd damping for arm motors (default: 3.0)")
+    parser.add_argument("--kd-wrist", type=float, default=None, help="Kd damping for wrist motors (default: 1.5)")
 
     args = parser.parse_args()
 

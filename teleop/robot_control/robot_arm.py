@@ -1218,7 +1218,7 @@ class H2_JointIndex(IntEnum):
 
 
 class H2_ArmController:
-    def __init__(self, simulation_mode=False):
+    def __init__(self, simulation_mode=False, kp_low=None, kp_wrist=None, kd_low=None, kd_wrist=None):
         logger_mp.info("Initialize H2_ArmController...")
         self.q_target = np.zeros(14)
         self.tauff_target = np.zeros(14)
@@ -1226,10 +1226,10 @@ class H2_ArmController:
         self.simulation_mode = simulation_mode
         self.kp_high = 300.0
         self.kd_high = 3.0
-        self.kp_low = 80.0
-        self.kd_low = 3.0
-        self.kp_wrist = 40.0
-        self.kd_wrist = 1.5
+        self.kp_low = kp_low if kp_low is not None else 150.0
+        self.kd_low = kd_low if kd_low is not None else 10.0
+        self.kp_wrist = kp_wrist if kp_wrist is not None else 50.0
+        self.kd_wrist = kd_wrist if kd_wrist is not None else 3.0
 
         self.all_motor_q = None
         self.arm_velocity_limit = 20.0
@@ -1283,6 +1283,9 @@ class H2_ArmController:
                 else:
                     self.msg.motor_cmd[id].kp = self.kp_high
                     self.msg.motor_cmd[id].kd = self.kd_high
+            logger_mp.info(
+                f"Motor {id.value} ({id.name}): kp={self.msg.motor_cmd[id].kp}, kd={self.msg.motor_cmd[id].kd}"
+            )
             self.msg.motor_cmd[id].q = self.all_motor_q[id]
         logger_mp.info("Lock OK!")
 

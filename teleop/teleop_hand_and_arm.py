@@ -136,6 +136,19 @@ if __name__ == "__main__":
         help="Sharpa URDF root variant: 'flange' for arm-flange mount (H2 default), 'wrist' to use the wrist housing as the root.",
     )
     parser.add_argument(
+        "--sharpa-source",
+        type=str,
+        choices=["sdk", "dds"],
+        default="sdk",
+        help="Sharpa hand state source: 'sdk' uses the Sharpa SDK directly (default), 'dds' reads joint states published by the retargeting script via DDS (avoids port 50001 conflict).",
+    )
+    parser.add_argument(
+        "--sharpa-dds-domain",
+        type=int,
+        default=0,
+        help="DDS domain ID used when --sharpa-source dds (default: 0).",
+    )
+    parser.add_argument(
         "--record-tactile",
         action="store_true",
         help="Include Sharpa tactile (5x F6 per hand) in recorded episodes.",
@@ -370,21 +383,24 @@ if __name__ == "__main__":
             )
         elif args.ee == "sharpa":
             from teleop.robot_control.robot_hand_sharpa import (
-                SharpaWave_Controller, SHARPA_DOF, SHARPA_TACTILE_PER_HAND,
+                SharpaWave_Controller,
+                SHARPA_DOF,
+                SHARPA_TACTILE_PER_HAND,
             )
 
             # Input array shape depends on Sharpa input mode.
             #   hand  → 25×3 XR keypoints flattened (75 floats / hand)
             #   manus → 22 pre-retargeted joint angles (radians)
             _sharpa_in_size = 75 if args.sharpa_input == "hand" else SHARPA_DOF
-            left_hand_pos_array = Array("d", _sharpa_in_size, lock=True)   # [input]
+            left_hand_pos_array = Array("d", _sharpa_in_size, lock=True)  # [input]
             right_hand_pos_array = Array("d", _sharpa_in_size, lock=True)  # [input]
             dual_hand_data_lock = Lock()
-            dual_hand_state_array = Array("d", 2 * SHARPA_DOF, lock=False)   # 44 floats
+            dual_hand_state_array = Array("d", 2 * SHARPA_DOF, lock=False)  # 44 floats
             dual_hand_action_array = Array("d", 2 * SHARPA_DOF, lock=False)  # 44 floats
             dual_hand_tactile_array = (
-                Array("d", 2 * SHARPA_TACTILE_PER_HAND, lock=False)          # 60 floats
-                if args.record_tactile else None
+                Array("d", 2 * SHARPA_TACTILE_PER_HAND, lock=False)  # 60 floats
+                if args.record_tactile
+                else None
             )
             hand_ctrl = SharpaWave_Controller(
                 left_hand_pos_array,
@@ -397,6 +413,8 @@ if __name__ == "__main__":
                 mount_variant=args.sharpa_mount,
                 fps=args.frequency,
                 simulation_mode=args.sim,
+                source=args.sharpa_source,
+                dds_domain=args.sharpa_dds_domain,
             )
         else:
             pass
@@ -443,11 +461,28 @@ if __name__ == "__main__":
             # End-effector joint / tactile metadata
             if args.ee == "sharpa":
                 _sharpa_left_joint_names = [
-                    "left_thumb_CMC_FE",  "left_thumb_CMC_AA",  "left_thumb_MCP_FE",  "left_thumb_MCP_AA",  "left_thumb_IP",
-                    "left_index_MCP_FE",  "left_index_MCP_AA",  "left_index_PIP",     "left_index_DIP",
-                    "left_middle_MCP_FE", "left_middle_MCP_AA", "left_middle_PIP",    "left_middle_DIP",
-                    "left_ring_MCP_FE",   "left_ring_MCP_AA",   "left_ring_PIP",      "left_ring_DIP",
-                    "left_pinky_CMC",     "left_pinky_MCP_FE",  "left_pinky_MCP_AA",  "left_pinky_PIP",   "left_pinky_DIP",
+                    "left_thumb_CMC_FE",
+                    "left_thumb_CMC_AA",
+                    "left_thumb_MCP_FE",
+                    "left_thumb_MCP_AA",
+                    "left_thumb_IP",
+                    "left_index_MCP_FE",
+                    "left_index_MCP_AA",
+                    "left_index_PIP",
+                    "left_index_DIP",
+                    "left_middle_MCP_FE",
+                    "left_middle_MCP_AA",
+                    "left_middle_PIP",
+                    "left_middle_DIP",
+                    "left_ring_MCP_FE",
+                    "left_ring_MCP_AA",
+                    "left_ring_PIP",
+                    "left_ring_DIP",
+                    "left_pinky_CMC",
+                    "left_pinky_MCP_FE",
+                    "left_pinky_MCP_AA",
+                    "left_pinky_PIP",
+                    "left_pinky_DIP",
                 ]
                 _sharpa_right_joint_names = [n.replace("left_", "right_") for n in _sharpa_left_joint_names]
                 _sharpa_tactile_names = ["thumb", "index", "middle", "ring", "pinky"] if args.record_tactile else None
@@ -750,7 +785,7 @@ if __name__ == "__main__":
                     tactiles = None
                     if args.ee == "sharpa" and args.record_tactile and sharpa_left_tactile is not None:
                         tactiles = {
-                            "left_ee":  {"f6": sharpa_left_tactile},
+                            "left_ee": {"f6": sharpa_left_tactile},
                             "right_ee": {"f6": sharpa_right_tactile},
                         }
 
@@ -766,8 +801,11 @@ if __name__ == "__main__":
                         )
                     else:
                         recorder.add_item(
-                            colors=colors, depths=depths,
-                            states=states, actions=actions, tactiles=tactiles,
+                            colors=colors,
+                            depths=depths,
+                            states=states,
+                            actions=actions,
+                            tactiles=tactiles,
                         )
 
             current_time = time.time()

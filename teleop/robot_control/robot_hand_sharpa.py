@@ -25,15 +25,19 @@ Sim mode: skip the SDK entirely. Useful for testing the recording / vis
 pipeline without hardware.
 """
 
+import math
+import os
+import sys
 import time
 import threading
 from enum import IntEnum
-from multiprocessing import Process, Array
+from multiprocessing import Process
 
 import numpy as np
 
 from teleop.robot_control.hand_retargeting import HandRetargeting, HandType
 import logging_mp
+
 logger_mp = logging_mp.getLogger(__name__)
 
 SHARPA_DOF = 22
@@ -67,25 +71,35 @@ class SharpaWave_Controller:
         speed_coeff, current_coeff: SDK motor scaling, 0..1.
     """
 
-    def __init__(self,
-                 left_hand_array, right_hand_array,
-                 dual_hand_data_lock=None,
-                 dual_hand_state_array=None,
-                 dual_hand_action_array=None,
-                 dual_hand_tactile_array=None,
-                 input_mode="hand",
-                 mount_variant="flange",
-                 fps=60.0,
-                 simulation_mode=False,
-                 speed_coeff=0.5,
-                 current_coeff=0.5,
-                 Unit_Test=False):
+    def __init__(
+        self,
+        left_hand_array,
+        right_hand_array,
+        dual_hand_data_lock=None,
+        dual_hand_state_array=None,
+        dual_hand_action_array=None,
+        dual_hand_tactile_array=None,
+        input_mode="hand",
+        mount_variant="flange",
+        fps=60.0,
+        simulation_mode=False,
+        speed_coeff=0.5,
+        current_coeff=0.5,
+        Unit_Test=False,
+        source="sdk",
+        dds_domain=0,
+    ):
         logger_mp.info("Initialize SharpaWave_Controller...")
         self.fps = fps
         self.input_mode = input_mode
         self.simulation_mode = simulation_mode
         self.speed_coeff = speed_coeff
         self.current_coeff = current_coeff
+        self.source = source
+        self.dds_domain = dds_domain
+
+        if source not in ("sdk", "dds"):
+            raise ValueError(f"Unknown source: {source!r}")
 
         if input_mode not in ("hand", "manus"):
             raise ValueError(f"Unknown input_mode: {input_mode!r}")
@@ -102,12 +116,23 @@ class SharpaWave_Controller:
         else:
             self.hand_retargeting = None
 
-        ctrl_proc = Process(
-            target=self._control_process,
-            args=(left_hand_array, right_hand_array,
-                  dual_hand_data_lock, dual_hand_state_array,
-                  dual_hand_action_array, dual_hand_tactile_array),
-        )
+        if source == "dds":
+            ctrl_proc = Process(
+                target=self._control_process_dds,
+                args=(dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, dds_domain),
+            )
+        else:
+            ctrl_proc = Process(
+                target=self._control_process,
+                args=(
+                    left_hand_array,
+                    right_hand_array,
+                    dual_hand_data_lock,
+                    dual_hand_state_array,
+                    dual_hand_action_array,
+                    dual_hand_tactile_array,
+                ),
+            )
         ctrl_proc.daemon = True
         ctrl_proc.start()
         logger_mp.info("Initialize SharpaWave_Controller OK!")
@@ -126,7 +151,10 @@ class SharpaWave_Controller:
             return None, None, None
 
         from sharpa import (  # local import so non-SDK installs can still import this module
-            SharpaWaveManager, HandSide, ControlMode, ControlSource,
+            SharpaWaveManager,
+            HandSide,
+            ControlMode,
+            ControlSource,
         )
 
         manager = SharpaWaveManager.get_instance()
@@ -190,11 +218,67 @@ class SharpaWave_Controller:
             return q[self.hand_retargeting.right_dex_retargeting_to_hardware]
 
     # ------------------------------------------------------------------
+    # DDS-based state reader (subprocess) — no SDK, no port conflicts
+    # ------------------------------------------------------------------
+    def _control_process_dds(self, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, dds_domain):
+        _sdk_path = os.path.expanduser("~/unitree_sdk2_python")
+        if os.path.isdir(_sdk_path) and _sdk_path not in sys.path:
+            sys.path.insert(0, _sdk_path)
+
+        from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
+        from unitree_sdk2py.idl.unitree_hg.msg.dds_ import HandState_
+
+        ChannelFactoryInitialize(dds_domain)
+
+        sub_left = ChannelSubscriber("rt/sharpa/left/state", HandState_)
+        sub_left.Init()
+        sub_right = ChannelSubscriber("rt/sharpa/right/state", HandState_)
+        sub_right.Init()
+        logger_mp.info("[SharpaWave/DDS] subscribed to rt/sharpa/{left,right}/state domain=%d", dds_domain)
+
+        left_angles = np.zeros(SHARPA_DOF, dtype=np.float64)
+        right_angles = np.zeros(SHARPA_DOF, dtype=np.float64)
+        period = 1.0 / self.fps
+
+        try:
+            while True:
+                t0 = time.time()
+
+                msg = sub_left.Read()
+                if msg is not None and msg.motor_state:
+                    n = min(len(msg.motor_state), SHARPA_DOF)
+                    for i in range(n):
+                        left_angles[i] = math.radians(msg.motor_state[i].q)
+
+                msg = sub_right.Read()
+                if msg is not None and msg.motor_state:
+                    n = min(len(msg.motor_state), SHARPA_DOF)
+                    for i in range(n):
+                        right_angles[i] = math.radians(msg.motor_state[i].q)
+
+                if dual_hand_state_array is not None and dual_hand_action_array is not None:
+                    combined = np.concatenate([left_angles, right_angles])
+                    with dual_hand_data_lock:
+                        dual_hand_state_array[:] = combined
+                        dual_hand_action_array[:] = combined
+
+                dt = time.time() - t0
+                time.sleep(max(0.0, period - dt))
+        finally:
+            logger_mp.info("[SharpaWave/DDS] control loop closed.")
+
+    # ------------------------------------------------------------------
     # Main control loop (subprocess)
     # ------------------------------------------------------------------
-    def _control_process(self, left_hand_array, right_hand_array,
-                         dual_hand_data_lock, dual_hand_state_array,
-                         dual_hand_action_array, dual_hand_tactile_array):
+    def _control_process(
+        self,
+        left_hand_array,
+        right_hand_array,
+        dual_hand_data_lock,
+        dual_hand_state_array,
+        dual_hand_action_array,
+        dual_hand_tactile_array,
+    ):
         try:
             manager, left_hand, right_hand = self._open_hands()
         except Exception as e:
@@ -204,7 +288,7 @@ class SharpaWave_Controller:
         # Tactile cache populated by SDK callbacks (real mode) or zeros (sim).
         tactile_lock = threading.Lock()
         tactile_cache = {
-            "left":  np.zeros(SHARPA_TACTILE_PER_HAND, dtype=np.float64),
+            "left": np.zeros(SHARPA_TACTILE_PER_HAND, dtype=np.float64),
             "right": np.zeros(SHARPA_TACTILE_PER_HAND, dtype=np.float64),
         }
 
@@ -215,15 +299,17 @@ class SharpaWave_Controller:
                     if isinstance(frame, dict):
                         f6 = np.asarray(frame["content"]["F6"], dtype=np.float64)
                     else:
-                        f6 = np.asarray(frame.f6_data if hasattr(frame, "f6_data") else
-                                        frame.content["F6"], dtype=np.float64)
+                        f6 = np.asarray(
+                            frame.f6_data if hasattr(frame, "f6_data") else frame.content["F6"], dtype=np.float64
+                        )
                     if f6.size != SHARPA_F6:
                         return
                     finger = ch % SHARPA_TACTILE_CHANNELS  # right=0..4, left=5..9 → 0..4
                     with tactile_lock:
-                        tactile_cache[side][finger * SHARPA_F6:(finger + 1) * SHARPA_F6] = f6
+                        tactile_cache[side][finger * SHARPA_F6 : (finger + 1) * SHARPA_F6] = f6
                 except Exception as e:
                     logger_mp.warning(f"[SharpaWave] tactile cb {side} error: {e}")
+
             return _cb
 
         if not self.simulation_mode:
@@ -248,11 +334,12 @@ class SharpaWave_Controller:
                     with right_hand_array.get_lock():
                         right_in = np.array(right_hand_array[:]).reshape(25, 3).copy()
                     # Skip retargeting until the XR side has populated valid data.
-                    valid = (not np.all(right_in == 0.0)) and \
-                            (not np.allclose(left_in[4], np.array([-1.13, 0.3, 0.15])))
+                    valid = (not np.all(right_in == 0.0)) and (
+                        not np.allclose(left_in[4], np.array([-1.13, 0.3, 0.15]))
+                    )
                     if valid:
                         try:
-                            left_q  = np.asarray(self._retarget_one("left",  left_in),  dtype=np.float64)
+                            left_q = np.asarray(self._retarget_one("left", left_in), dtype=np.float64)
                             right_q = np.asarray(self._retarget_one("right", right_in), dtype=np.float64)
                         except Exception as e:
                             logger_mp.warning(f"[SharpaWave] retarget error: {e}")
@@ -267,9 +354,9 @@ class SharpaWave_Controller:
                     state_left, state_right = left_q.copy(), right_q.copy()
                 else:
                     try:
-                        self._command(left_hand,  left_q)
+                        self._command(left_hand, left_q)
                         self._command(right_hand, right_q)
-                        state_left  = self._read_state(left_hand)
+                        state_left = self._read_state(left_hand)
                         state_right = self._read_state(right_hand)
                     except Exception as e:
                         logger_mp.warning(f"[SharpaWave] command/read error: {e}")
@@ -280,7 +367,7 @@ class SharpaWave_Controller:
                     state = np.concatenate([state_left, state_right])
                     action = np.concatenate([left_q, right_q])
                     with dual_hand_data_lock:
-                        dual_hand_state_array[:]  = state
+                        dual_hand_state_array[:] = state
                         dual_hand_action_array[:] = action
 
                 if dual_hand_tactile_array is not None:
@@ -295,9 +382,11 @@ class SharpaWave_Controller:
             logger_mp.info("[SharpaWave] control loop closed.")
             try:
                 if left_hand is not None:
-                    left_hand.set_enable_state(False); left_hand.stop()
+                    left_hand.set_enable_state(False)
+                    left_hand.stop()
                 if right_hand is not None:
-                    right_hand.set_enable_state(False); right_hand.stop()
+                    right_hand.set_enable_state(False)
+                    right_hand.stop()
                 if manager is not None:
                     manager.disconnect_all()
             except Exception:

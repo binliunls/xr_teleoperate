@@ -12,9 +12,11 @@ class HandType(Enum):
     UNITREE_DEX3_Unit_Test = "../../assets/unitree_hand/unitree_dex3.yml"
     BRAINCO_HAND = "../assets/brainco_hand/brainco.yml"
     BRAINCO_HAND_Unit_Test = "../../assets/brainco_hand/brainco.yml"
+    UNITREE_SHARPA = "../assets/unitree_hand/unitree_sharpa.yml"
+    UNITREE_SHARPA_Unit_Test = "../../assets/unitree_hand/unitree_sharpa.yml"
 
 class HandRetargeting:
-    def __init__(self, hand_type: HandType):
+    def __init__(self, hand_type: HandType, variant: str = None):
         if hand_type == HandType.UNITREE_DEX3:
             RetargetingConfig.set_default_urdf_dir('../assets')
         elif hand_type == HandType.UNITREE_DEX3_Unit_Test:
@@ -27,6 +29,10 @@ class HandRetargeting:
             RetargetingConfig.set_default_urdf_dir('../assets')
         elif hand_type == HandType.BRAINCO_HAND_Unit_Test:
             RetargetingConfig.set_default_urdf_dir('../../assets')
+        elif hand_type == HandType.UNITREE_SHARPA:
+            RetargetingConfig.set_default_urdf_dir('../assets')
+        elif hand_type == HandType.UNITREE_SHARPA_Unit_Test:
+            RetargetingConfig.set_default_urdf_dir('../../assets')
 
         config_file_path = Path(hand_type.value)
 
@@ -36,6 +42,18 @@ class HandRetargeting:
                 
             if 'left' not in self.cfg or 'right' not in self.cfg:
                 raise ValueError("Configuration file must contain 'left' and 'right' keys.")
+
+            # Sharpa: switch between with_flange / with_wrist URDFs at load time.
+            # Both variants have the same 22 finger DOFs; only the root link differs.
+            if hand_type in (HandType.UNITREE_SHARPA, HandType.UNITREE_SHARPA_Unit_Test):
+                v = (variant or "flange").lower()
+                if v not in ("flange", "wrist"):
+                    raise ValueError(f"Sharpa variant must be 'flange' or 'wrist', got {variant!r}")
+                for side in ("left", "right"):
+                    self.cfg[side]['urdf_path'] = (
+                        f"unitree_hand/sharpa_urdf/{side}_sharpa_wave/{side}_sharpa_wave_with_{v}.urdf"
+                    )
+                    self.cfg[side]['wrist_link_name'] = f"{side}_hand_{'flange' if v == 'flange' else 'wrist'}"
 
             left_retargeting_config = RetargetingConfig.from_dict(self.cfg['left'])
             right_retargeting_config = RetargetingConfig.from_dict(self.cfg['right'])
@@ -75,7 +93,21 @@ class HandRetargeting:
                                                        'right_middle_proximal_joint', 'right_ring_proximal_joint', 'right_pinky_proximal_joint' ]
                 self.left_dex_retargeting_to_hardware = [ self.left_retargeting_joint_names.index(name) for name in self.left_brainco_api_joint_names]
                 self.right_dex_retargeting_to_hardware = [ self.right_retargeting_joint_names.index(name) for name in self.right_brainco_api_joint_names]
-        
+
+            elif hand_type == HandType.UNITREE_SHARPA or hand_type == HandType.UNITREE_SHARPA_Unit_Test:
+                # SharpaWave SDK joint order: thumb (5) → index (4) → middle (4) → ring (4) → pinky (5).
+                # Order matches the URDF declaration order; verify against `hand.get_states().angles`.
+                self.left_sharpa_api_joint_names = [
+                    "left_thumb_CMC_FE",  "left_thumb_CMC_AA",  "left_thumb_MCP_FE",  "left_thumb_MCP_AA",  "left_thumb_IP",
+                    "left_index_MCP_FE",  "left_index_MCP_AA",  "left_index_PIP",     "left_index_DIP",
+                    "left_middle_MCP_FE", "left_middle_MCP_AA", "left_middle_PIP",    "left_middle_DIP",
+                    "left_ring_MCP_FE",   "left_ring_MCP_AA",   "left_ring_PIP",      "left_ring_DIP",
+                    "left_pinky_CMC",     "left_pinky_MCP_FE",  "left_pinky_MCP_AA",  "left_pinky_PIP",   "left_pinky_DIP",
+                ]
+                self.right_sharpa_api_joint_names = [n.replace("left_", "right_") for n in self.left_sharpa_api_joint_names]
+                self.left_dex_retargeting_to_hardware  = [ self.left_retargeting_joint_names.index(n)  for n in self.left_sharpa_api_joint_names ]
+                self.right_dex_retargeting_to_hardware = [ self.right_retargeting_joint_names.index(n) for n in self.right_sharpa_api_joint_names ]
+
         except FileNotFoundError:
             logger_mp.warning(f"Configuration file not found: {config_file_path}")
             raise

@@ -118,13 +118,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ee",
         type=str,
-        choices=["dex1", "dex3", "inspire_ftp", "inspire_dfx", "brainco"],
+        choices=["dex1", "dex3", "inspire_ftp", "inspire_dfx", "brainco", "sharpa"],
         help="Select end effector controller",
+    )
+    parser.add_argument(
+        "--sharpa-dds-domain",
+        type=int,
+        default=0,
+        help="DDS domain ID for Sharpa hand state (must match retargeting script -dds_domain, default: 0).",
     )
     parser.add_argument(
         "--img-server-ip",
         type=str,
-        default="192.168.123.164",
+        default="192.168.124.162",
         help="IP address of image server, used by teleimager and televuer",
     )
     parser.add_argument(
@@ -153,25 +159,25 @@ if __name__ == "__main__":
     parser.add_argument(
         "--task-name",
         type=str,
-        default="pick cube",
+        default="pick_apple",
         help="task file name for recording",
     )
     parser.add_argument(
         "--task-goal",
         type=str,
-        default="pick up cube.",
+        default="pick_up_apple_and_place_in_tray.",
         help="task goal for recording at json file",
     )
     parser.add_argument(
         "--task-desc",
         type=str,
-        default="task description",
+        default="pick_up_apple_and_place_in_tray.",
         help="task description for recording at json file",
     )
     parser.add_argument(
         "--task-steps",
         type=str,
-        default="step1: do this; step2: do that;",
+        default="step1: pickup apple; step2: change hand; step3: place apple in tray;",
         help="task steps for recording at json file",
     )
 
@@ -203,28 +209,14 @@ if __name__ == "__main__":
             listen_keyboard_thread.start()
 
         # image client
-        if args.arm == "H2":
-            # H2 does not use cameras
-            img_client = None
-            camera_config = {
-                "head_camera": {
-                    "enable_zmq": False,
-                    "enable_webrtc": False,
-                    "binocular": False,
-                    "image_shape": (480, 640),
-                    "webrtc_port": 8889,
-                },
-                "left_wrist_camera": {"enable_zmq": False},
-                "right_wrist_camera": {"enable_zmq": False},
-            }
-            xr_need_local_img = False
-        else:
-            img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
-            camera_config = img_client.get_cam_config()
-            logger_mp.debug(f"Camera config: {camera_config}")
-            xr_need_local_img = not (
-                args.display_mode == "pass-through" or camera_config["head_camera"]["enable_webrtc"]
-            )
+        img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
+        camera_config = img_client.get_cam_config()
+        logger_mp.debug(f"Camera config: {camera_config}")
+        # H2 uses pass-through display so never needs to push images to the XR headset,
+        # but still captures images for recording when the server has zmq enabled.
+        xr_need_local_img = args.arm != "H2" and not (
+            args.display_mode == "pass-through" or camera_config["head_camera"]["enable_webrtc"]
+        )
 
         # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
         tv_wrapper = TeleVuerWrapper(
@@ -264,7 +256,7 @@ if __name__ == "__main__":
             arm_ctrl = H1_ArmController(simulation_mode=args.sim)
         elif args.arm == "H2":
             arm_ik = H2_ArmIK()
-            arm_ctrl = H2_ArmController(simulation_mode=args.sim)
+            arm_ctrl = H2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
 
         # end-effector
         if args.ee == "dex3":
@@ -349,6 +341,22 @@ if __name__ == "__main__":
                 dual_hand_action_array,
                 simulation_mode=args.sim,
             )
+        elif args.ee == "sharpa":
+            from teleop.robot_control.robot_hand_sharpa import (
+                SharpaWave_Controller,
+                SHARPA_DOF,
+            )
+
+            dual_hand_data_lock = Lock()
+            dual_hand_state_array = Array("d", 2 * SHARPA_DOF, lock=False)
+            dual_hand_action_array = Array("d", 2 * SHARPA_DOF, lock=False)
+            hand_ctrl = SharpaWave_Controller(
+                dual_hand_data_lock=dual_hand_data_lock,
+                dual_hand_state_array=dual_hand_state_array,
+                dual_hand_action_array=dual_hand_action_array,
+                fps=args.frequency,
+                dds_domain=args.sharpa_dds_domain,
+            )
         else:
             pass
 
@@ -391,10 +399,44 @@ if __name__ == "__main__":
                 rerun_log=not args.headless,
             )
 
+            # End-effector joint / tactile metadata
+            if args.ee == "sharpa":
+                _sharpa_left_joint_names = [
+                    "left_thumb_CMC_FE",
+                    "left_thumb_CMC_AA",
+                    "left_thumb_MCP_FE",
+                    "left_thumb_MCP_AA",
+                    "left_thumb_IP",
+                    "left_index_MCP_FE",
+                    "left_index_MCP_AA",
+                    "left_index_PIP",
+                    "left_index_DIP",
+                    "left_middle_MCP_FE",
+                    "left_middle_MCP_AA",
+                    "left_middle_PIP",
+                    "left_middle_DIP",
+                    "left_ring_MCP_FE",
+                    "left_ring_MCP_AA",
+                    "left_ring_PIP",
+                    "left_ring_DIP",
+                    "left_pinky_CMC",
+                    "left_pinky_MCP_FE",
+                    "left_pinky_MCP_AA",
+                    "left_pinky_PIP",
+                    "left_pinky_DIP",
+                ]
+                _sharpa_right_joint_names = [n.replace("left_", "right_") for n in _sharpa_left_joint_names]
+                recorder.set_ee_metadata(
+                    left_joint_names=_sharpa_left_joint_names,
+                    right_joint_names=_sharpa_right_joint_names,
+                )
+
         logger_mp.info("----------------------------------------------------------------")
         logger_mp.info("🟢  Press [r] on keyboard or [B button] on right controller to start syncing.")
         if args.record:
-            logger_mp.info("🟡  Press [s] to START or SAVE recording (toggle cycle).")
+            logger_mp.info(
+                "🟡  Press [s] on keyboard or [Y button] on right controller to START or SAVE recording (toggle cycle)."
+            )
         else:
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
         logger_mp.info("🔴  Press [q] on keyboard or [A button] on right controller to stop and exit.")
@@ -423,19 +465,23 @@ if __name__ == "__main__":
         left_wrist_img = None
         right_wrist_img = None
 
+        # Buffer for t+1 action labeling: action[t] = state[t+1]
+        _sharpa_ee_prev = None  # (left_list, right_list) from previous step
+        prev_y_button = False  # for edge detection on Y button
+
         # main loop. robot start to follow VR user's motion
         while not STOP:
             start_time = time.time()
             # get image
-            if args.arm != "H2" and camera_config["head_camera"]["enable_zmq"]:
+            if camera_config["head_camera"]["enable_zmq"]:
                 if args.record or xr_need_local_img:
                     head_img = img_client.get_head_frame()
                 if xr_need_local_img:
                     tv_wrapper.render_to_xr(head_img)
-            if args.arm != "H2" and camera_config["left_wrist_camera"]["enable_zmq"]:
+            if camera_config["left_wrist_camera"]["enable_zmq"]:
                 if args.record:
                     left_wrist_img = img_client.get_left_wrist_frame()
-            if args.arm != "H2" and camera_config["right_wrist_camera"]["enable_zmq"]:
+            if camera_config["right_wrist_camera"]["enable_zmq"]:
                 if args.record:
                     right_wrist_img = img_client.get_right_wrist_frame()
 
@@ -481,6 +527,12 @@ if __name__ == "__main__":
                 if tele_data.right_ctrl_aButton:
                     START = False
                     STOP = True
+
+                # toggle recording on rising edge of Y button (left controller B = Y)
+                y_button = tele_data.left_ctrl_bButton
+                if args.record and y_button and not prev_y_button:
+                    RECORD_TOGGLE = True
+                prev_y_button = y_button
 
                 if args.motion:
                     # command robot to enter damping mode. soft emergency stop function
@@ -551,6 +603,22 @@ if __name__ == "__main__":
                         right_hand_action = dual_hand_action_array[-6:]
                         current_body_state = []
                         current_body_action = []
+                elif args.ee == "sharpa":
+                    with dual_hand_data_lock:
+                        curr_left_ee = list(dual_hand_state_array[:SHARPA_DOF])
+                        curr_right_ee = list(dual_hand_state_array[-SHARPA_DOF:])
+                    if all(v == 0.0 for v in curr_left_ee) and all(v == 0.0 for v in curr_right_ee):
+                        logger_mp.warning(
+                            "[SharpaWave] hand data is ALL ZEROS — retargeting script may not be running or DDS topic not received"
+                        )
+                    # action[t] = state[t+1]: recorded action is the next step's observed state
+                    left_ee_state = _sharpa_ee_prev[0] if _sharpa_ee_prev is not None else curr_left_ee
+                    right_ee_state = _sharpa_ee_prev[1] if _sharpa_ee_prev is not None else curr_right_ee
+                    left_hand_action = curr_left_ee
+                    right_hand_action = curr_right_ee
+                    _sharpa_ee_prev = (curr_left_ee, curr_right_ee)
+                    current_body_state = []
+                    current_body_action = []
                 else:
                     left_ee_state = []
                     right_ee_state = []
@@ -567,7 +635,7 @@ if __name__ == "__main__":
                 if RECORD_RUNNING:
                     colors = {}
                     depths = {}
-                    if args.arm != "H2" and camera_config["head_camera"]["binocular"]:
+                    if camera_config["head_camera"]["binocular"]:
                         if camera_config["head_camera"]["enable_zmq"]:
                             if head_img is not None:
                                 colors[f"color_{0}"] = head_img.bgr[
@@ -590,10 +658,10 @@ if __name__ == "__main__":
                                 colors[f"color_{3}"] = right_wrist_img.bgr
                             else:
                                 logger_mp.warning("Right wrist image is None!")
-                    elif args.arm != "H2":
+                    else:
                         if camera_config["head_camera"]["enable_zmq"]:
                             if head_img is not None:
-                                colors[f"color_{0}"] = head_img
+                                colors[f"color_{0}"] = head_img.bgr
                             else:
                                 logger_mp.warning("Head image is None!")
                         if camera_config["left_wrist_camera"]["enable_zmq"]:
@@ -666,7 +734,12 @@ if __name__ == "__main__":
                             sim_state=sim_state,
                         )
                     else:
-                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions)
+                        recorder.add_item(
+                            colors=colors,
+                            depths=depths,
+                            states=states,
+                            actions=actions,
+                        )
 
             current_time = time.time()
             time_elapsed = current_time - start_time

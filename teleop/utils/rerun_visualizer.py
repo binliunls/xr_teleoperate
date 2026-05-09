@@ -88,10 +88,12 @@ class RerunLogger:
         views = []
 
         data_plot_paths = [
-                           f"{self.prefix}left_arm", 
-                           f"{self.prefix}right_arm", 
-                           f"{self.prefix}left_ee", 
-                           f"{self.prefix}right_ee"
+                           f"{self.prefix}left_arm",
+                           f"{self.prefix}right_arm",
+                           f"{self.prefix}left_ee",
+                           f"{self.prefix}right_ee",
+                           f"{self.prefix}left_ee/tactile",
+                           f"{self.prefix}right_ee/tactile",
         ]
         for plot_path in data_plot_paths:
             view = rrb.TimeSeriesView(
@@ -168,11 +170,27 @@ class RerunLogger:
         #         # rr.log(f"{self.prefix}depths/{depth_key}", rr.Image(depth_val))
         #         pass # Handle depth if needed
 
-        # # Log tactile if needed
-        # tactiles = item_data.get('tactiles', {}) or {}
-        # for hand, tactile_vals in tactiles.items():
-        #     if tactile_vals is not None:
-        #         pass # Handle tactile if needed
+        # Log tactile (Sharpa: 5 fingers × 6-axis F6 per hand).
+        # Expected shape: tactiles[hand]["f6"] is a flat list of 30 floats
+        # (5 channels × [Fx, Fy, Fz, Mx, My, Mz]). Channels ordered:
+        # thumb, index, middle, ring, pinky.
+        _finger_names = ["thumb", "index", "middle", "ring", "pinky"]
+        _f6_axes = ["Fx", "Fy", "Fz", "Mx", "My", "Mz"]
+        tactiles = item_data.get('tactiles', {}) or {}
+        for hand, t in tactiles.items():
+            if not t:
+                continue
+            f6 = t.get('f6')
+            if not f6 or len(f6) < 30:
+                continue
+            for ch in range(5):
+                base = ch * 6
+                fx, fy, fz, mx, my, mz = f6[base:base + 6]
+                fmag = (fx * fx + fy * fy + fz * fz) ** 0.5
+                rr.log(f"{self.prefix}{hand}/tactile/{_finger_names[ch]}/Fmag", rr.Scalar(fmag))
+                for i, ax in enumerate(_f6_axes):
+                    rr.log(f"{self.prefix}{hand}/tactile/{_finger_names[ch]}/{ax}",
+                           rr.Scalar(f6[base + i]))
 
         # # Log audios if needed
         # audios = item_data.get('audios', {}) or {}

@@ -256,7 +256,7 @@ if __name__ == "__main__":
             arm_ctrl = H1_ArmController(simulation_mode=args.sim)
         elif args.arm == "H2":
             arm_ik = H2_ArmIK()
-            arm_ctrl = H2_ArmController(simulation_mode=args.sim)
+            arm_ctrl = H2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
 
         # end-effector
         if args.ee == "dex3":

@@ -141,6 +141,14 @@ if __name__ == "__main__":
     )
     # mode flags
     parser.add_argument("--motion", action="store_true", help="Enable motion control mode")
+    parser.add_argument(
+        "--head-pitch-home",
+        type=float,
+        default=0.7,
+        metavar="RAD",
+        help="H2 head pitch at home/rest position in radians (default: 0.3, looking slightly down). "
+        "Range: -0.523 (up) to 0.837 (down).",
+    )
     parser.add_argument("--headless", action="store_true", help="Enable headless mode (no display)")
     parser.add_argument("--sim", action="store_true", help="Enable isaac simulation mode")
     parser.add_argument(
@@ -256,7 +264,9 @@ if __name__ == "__main__":
             arm_ctrl = H1_ArmController(simulation_mode=args.sim)
         elif args.arm == "H2":
             arm_ik = H2_ArmIK()
-            arm_ctrl = H2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+            arm_ctrl = H2_ArmController(
+                motion_mode=args.motion, simulation_mode=args.sim, head_pitch_home=args.head_pitch_home
+            )
 
         # end-effector
         if args.ee == "dex3":

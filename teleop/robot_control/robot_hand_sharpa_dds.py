@@ -49,11 +49,20 @@ class SharpaHandDDSClient:
             self._state_deg = [msg.motor_state[i].q for i in range(min(NUM_JOINTS, len(msg.motor_state)))]
 
     def _make_cmd(self, positions_rad: list) -> HandCmd_:
-        msg = HandCmd_()
-        msg.motor_cmd = [MotorCmd_() for _ in range(NUM_JOINTS)]
-        for i, q in enumerate(positions_rad[:NUM_JOINTS]):
-            msg.motor_cmd[i].q = float(q)
-        return msg
+        # MotorCmd_ requires (mode, q, dq, tau, kp, kd, reserve); HandCmd_ requires (motor_cmd, reserve).
+        motor_cmd = [
+            MotorCmd_(
+                mode=0,
+                q=float(positions_rad[i]) if i < len(positions_rad) else 0.0,
+                dq=0.0,
+                tau=0.0,
+                kp=0.0,
+                kd=0.0,
+                reserve=0,
+            )
+            for i in range(NUM_JOINTS)
+        ]
+        return HandCmd_(motor_cmd=motor_cmd, reserve=[0, 0, 0, 0])
 
     def set_joint_position(self, positions_rad: list, interpolation: bool = False):
         """Send target joint positions (radians) to the bridge."""

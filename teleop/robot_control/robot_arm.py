@@ -1218,10 +1218,6 @@ class H2_JointIndex(IntEnum):
 
 
 class H2_ArmController:
-    # H2 head joint limits (radians)
-    HEAD_PITCH_LIMIT = (-0.523, 0.837)  # negative = up, positive = down
-    HEAD_YAW_LIMIT = (-1.745, 1.745)  # negative = right, positive = left
-
     def __init__(
         self,
         motion_mode=False,
@@ -1282,13 +1278,8 @@ class H2_ArmController:
         self.msg.mode_machine = self.get_mode_machine()
 
         self.all_motor_q = self.get_current_motor_q()
-        # Start head target at actual hardware position to avoid startup snap
-        self.head_q_target = np.array(
-            [
-                self.all_motor_q[H2_JointIndex.kHeadPitch],
-                self.all_motor_q[H2_JointIndex.kHeadYaw],
-            ]
-        )
+        # Fixed head pose; clip_head_q_target rate-limits the move so it won't snap.
+        self.head_q_target = np.array([self.head_pitch_home, 0.0])
         logger_mp.debug(f"Current all body motor state q:\n{self.all_motor_q} \n")
         logger_mp.debug(f"Current two arms motor state q:\n{self.get_current_dual_arm_q()}\n")
         logger_mp.info("Lock all joints except two arms...")
@@ -1398,13 +1389,6 @@ class H2_ArmController:
             self.q_target = q_target
             self.tauff_target = tauff_target
 
-    def ctrl_head(self, pitch: float, yaw: float):
-        """Set head pitch and yaw targets (radians). Clipped to joint limits."""
-        pitch = float(np.clip(pitch, *self.HEAD_PITCH_LIMIT))
-        yaw = float(np.clip(yaw, *self.HEAD_YAW_LIMIT))
-        with self.ctrl_lock:
-            self.head_q_target = np.array([pitch, yaw])
-
     def get_mode_machine(self):
         """Return current dds mode machine."""
         return self.lowstate_subscriber.Read().mode_machine
@@ -1437,10 +1421,6 @@ class H2_ArmController:
                 break
             current_attempts += 1
             time.sleep(0.05)
-        if self.motion_mode:
-            for weight in np.linspace(1, 0, num=101):
-                self.msg.motor_cmd[H2_JointIndex.kNotUsedJoint0].q = weight
-                time.sleep(0.02)
 
     def speed_gradual_max(self, t=5.0):
         self._gradual_start_time = time.time()

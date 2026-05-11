@@ -125,7 +125,8 @@ if __name__ == "__main__":
         "--sharpa-dds-domain",
         type=int,
         default=0,
-        help="DDS domain ID for Sharpa hand state (must match retargeting script -dds_domain, default: 0).",
+        help="DDS domain ID for Sharpa hand state — must match the publisher "
+        "(bridge on Thor or retargeting daemon). Default: 0.",
     )
     parser.add_argument(
         "--img-server-ip",
@@ -619,7 +620,9 @@ if __name__ == "__main__":
                         curr_right_ee = list(dual_hand_state_array[-SHARPA_DOF:])
                     if all(v == 0.0 for v in curr_left_ee) and all(v == 0.0 for v in curr_right_ee):
                         logger_mp.warning(
-                            "[SharpaWave] hand data is ALL ZEROS — retargeting script may not be running or DDS topic not received"
+                            "[SharpaWave] hand state is ALL ZEROS — check that the bridge "
+                            "(or retargeting -sdk -dds) is publishing rt/sharpa/{left,right}/state "
+                            "on the same DDS domain"
                         )
                     # action[t] = state[t+1]: recorded action is the next step's observed state
                     left_ee_state = _sharpa_ee_prev[0] if _sharpa_ee_prev is not None else curr_left_ee

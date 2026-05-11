@@ -1,8 +1,14 @@
 """
-SharpaWave dexterous hand controller for xr_teleoperate.
+SharpaWave dexterous hand state subscriber for xr_teleoperate.
 
-Reads Sharpa hand joint states from DDS topics published by the
-retargeting script (retargeting_manus_demo_multiprocess.py -sdk -dds).
+Read-only — subscribes to the Sharpa hand joint-state topics on DDS and exposes
+the angles via shared arrays for recording. Does NOT send commands; commands
+are sent by the retargeting daemon (e.g. retargeting_manus_demo_dds.py) running
+in parallel on the same DDS domain.
+
+The state topics can be published by either:
+  - the C++ bridge on Thor (scripts/sharpa_dds_bridge), or
+  - the retargeting demo with -sdk -dds running directly against the SDK.
 
 Topics:
   rt/sharpa/left/state   — 22 joints, motor_state[i].q in degrees
@@ -50,8 +56,9 @@ class SharpaWave_Controller:
     """
     Reads Sharpa hand joint states from DDS and exposes them via shared arrays.
 
-    Requires the retargeting script to be running with -sdk -dds on the same
-    DDS domain. Does not use the Sharpa SDK — no port 50001 conflict.
+    Requires a publisher of rt/sharpa/{left,right}/state on the same DDS domain
+    (the C++ bridge on Thor, or the retargeting demo in -sdk -dds mode).
+    Does not use the Sharpa SDK — no port 50001 conflict.
 
     Args:
         dual_hand_data_lock:    multiprocessing Lock

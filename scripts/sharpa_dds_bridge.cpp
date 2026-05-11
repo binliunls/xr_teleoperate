@@ -139,6 +139,7 @@ private:
 // ── hand setup ────────────────────────────────────────────────────────────────
 
 static sharpa::SharpaWave& connect_hand(const std::string& side, float speed,
+                                         bool skip_tactile,
                                          int discovery_timeout_s = 300) {
     auto& manager  = sharpa::SharpaWaveManager::get_instance();
     auto  deadline = std::chrono::steady_clock::now()
@@ -163,12 +164,18 @@ static sharpa::SharpaWave& connect_hand(const std::string& side, float speed,
 
     sharpa::HandSide hs = (side == "left") ? sharpa::HandSide::LEFT
                                            : sharpa::HandSide::RIGHT;
-    auto& hand = manager.connect(hs);
+    // We always let the SDK initialize tactile (skip_tactile=false here, regardless
+    // of the user flag) so we have a control channel to the tactile board. With
+    // skip_tactile=true the SDK reports "Tactile sensor not ready" when we try to
+    // call set_parameter for JPEG disable.
+    // We then either leave JPEG enabled (--tactile) or disable it via JSON below.
+    auto& hand = manager.connect(hs, /*skip_tactile=*/false);
 
     auto check = [&](const std::string& name, sharpa::Error err) {
         if (err.code != 0)
             throw std::runtime_error("[" + side + "] " + name + ": " + err.message);
     };
+
     check("set_control_mode",   hand.set_control_mode(sharpa::ControlMode::POSITION));
     check("set_speed_coeff",    hand.set_speed_coeff(speed));
     check("set_current_coeff",  hand.set_current_coeff(0.6f));
@@ -176,6 +183,25 @@ static sharpa::SharpaWave& connect_hand(const std::string& side, float speed,
 
     if (!hand.start())
         throw std::runtime_error("[" + side + "] start() returned false");
+
+    if (skip_tactile) {
+        // Disable tactile-JPEG transmission on the device — this is the ~30 Mb/s
+        // stream that saturates a 100 Mb link when both hands are running.
+        // SDK 5.0 form (see SDK_500/sample/c++/sharpa_tactile_fetch.cc:102).
+        // Must run AFTER hand.start() — set_parameter rejects with
+        // "Tactile sensor not ready" if the tactile subsystem hasn't started yet.
+        const std::string kDisableJpeg =
+            R"({"secret_function":"set_tactile_jpeg_enable","enable":false,"channel":-1})";
+        auto err = hand.set_parameter(kDisableJpeg);
+        if (err.code != 0)
+            std::cerr << "[" << side << "] WARN: set_parameter(set_tactile_jpeg_enable=false): "
+                      << err.message << "\n";
+        else
+            std::cout << "[" << side << "] tactile JPEG stream disabled\n";
+        // Give the device a moment to actually stop transmitting before
+        // attempting the next operation / connecting the second hand.
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
 
     hand.set_joint_position(std::vector<float>(NUM_JOINTS, 0.0f), true);
     std::cout << "[" << side << "] hand ready.\n";
@@ -202,16 +228,19 @@ static void on_signal(int) { g_running = false; }
 // ── main ──────────────────────────────────────────────────────────────────────
 
 static void print_usage(const char* prog) {
-    std::cerr << "Usage: " << prog << " [--speed FLOAT] [--state-hz FLOAT] [--side left|right|both]\n"
+    std::cerr << "Usage: " << prog
+              << " [--speed FLOAT] [--state-hz FLOAT] [--side left|right|both] [--tactile]\n"
               << "  --speed FLOAT    hand speed coefficient (default: 0.5)\n"
               << "  --state-hz FLOAT state publish rate Hz (default: 50)\n"
-              << "  --side STR       which hand(s) to bridge: left, right, or both (default: both)\n";
+              << "  --side STR       which hand(s) to bridge: left, right, or both (default: both)\n"
+              << "  --tactile        keep device-side tactile JPEG stream on (default: off; ~30 Mb/s per hand)\n";
 }
 
 int main(int argc, char* argv[]) {
     float speed    = 0.5f;
     float state_hz = 50.0f;
     std::string side = "both";
+    bool enable_tactile = false;
 
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--speed") && i + 1 < argc)
@@ -220,6 +249,8 @@ int main(int argc, char* argv[]) {
             state_hz = std::stof(argv[++i]);
         else if (!std::strcmp(argv[i], "--side") && i + 1 < argc)
             side = argv[++i];
+        else if (!std::strcmp(argv[i], "--tactile"))
+            enable_tactile = true;
         else { print_usage(argv[0]); return 1; }
     }
 
@@ -239,9 +270,11 @@ int main(int argc, char* argv[]) {
     sharpa::SharpaWave* right_hand = nullptr;
 
     try {
-        std::cout << "Connecting to Sharpa hands (side=" << side << ")...\n";
-        if (want_left)  left_hand  = &connect_hand("left",  speed);
-        if (want_right) right_hand = &connect_hand("right", speed);
+        std::cout << "Connecting to Sharpa hands (side=" << side
+                  << ", tactile=" << (enable_tactile ? "on" : "off") << ")...\n";
+        const bool skip_tactile = !enable_tactile;
+        if (want_left)  left_hand  = &connect_hand("left",  speed, skip_tactile);
+        if (want_right) right_hand = &connect_hand("right", speed, skip_tactile);
     } catch (const std::exception& e) {
         std::cerr << "ERROR: " << e.what() << "\n";
         sharpa::SharpaWaveManager::get_instance().disconnect_all();

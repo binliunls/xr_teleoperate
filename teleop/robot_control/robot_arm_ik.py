@@ -1377,11 +1377,19 @@ class H1_ArmIK:
 
 
 class H2_ArmIK:
-    def __init__(self, Unit_Test=False, Visualization=False):
+    def __init__(
+        self,
+        Unit_Test=False,
+        Visualization=False,
+        human_arm_length=0.60,
+        robot_arm_length=0.69,
+    ):
         np.set_printoptions(precision=5, suppress=True, linewidth=200)
 
         self.Unit_Test = Unit_Test
         self.Visualization = Visualization
+        self.human_arm_length = float(human_arm_length)
+        self.robot_arm_length = float(robot_arm_length)
 
         # fixed cache file path
         self.cache_path = "h2_model_cache.pkl"
@@ -1722,6 +1730,12 @@ class H2_ArmIK:
                     seed_reset = True
         self.opti.set_initial(self.var_q, self.init_data)
 
+        left_wrist, right_wrist = self.scale_arms(
+            left_wrist,
+            right_wrist,
+            human_arm_length=self.human_arm_length,
+            robot_arm_length=self.robot_arm_length,
+        )
         if self.Visualization:
             self.vis.viewer["L_ee_target"].set_transform(left_wrist)
             self.vis.viewer["R_ee_target"].set_transform(right_wrist)

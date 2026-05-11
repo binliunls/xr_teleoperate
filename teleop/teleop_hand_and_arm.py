@@ -139,6 +139,13 @@ if __name__ == "__main__":
         default=None,
         help="Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.",
     )
+    parser.add_argument(
+        "--human-arm-length",
+        type=float,
+        default=0.60,
+        metavar="M",
+        help="Human arm length used for wrist pose scaling in IK (meters).",
+    )
     # mode flags
     parser.add_argument("--motion", action="store_true", help="Enable motion control mode")
     parser.add_argument(
@@ -263,7 +270,7 @@ if __name__ == "__main__":
             arm_ik = H1_ArmIK()
             arm_ctrl = H1_ArmController(simulation_mode=args.sim)
         elif args.arm == "H2":
-            arm_ik = H2_ArmIK()
+            arm_ik = H2_ArmIK(human_arm_length=args.human_arm_length, robot_arm_length=0.69)
             arm_ctrl = H2_ArmController(
                 motion_mode=args.motion, simulation_mode=args.sim, head_pitch_home=args.head_pitch_home
             )

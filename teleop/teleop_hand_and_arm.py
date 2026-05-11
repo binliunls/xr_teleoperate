@@ -135,6 +135,15 @@ if __name__ == "__main__":
         help="IP address of image server, used by teleimager and televuer",
     )
     parser.add_argument(
+        "--camera-source",
+        type=str,
+        choices=["zmq", "ros"],
+        default="ros",
+        help="Camera source: 'zmq' (teleimager image server) or 'ros' "
+        "(rclpy subscriber on /head/{left,right}/image_raw and /wrist/{left,right}/image_raw). "
+        "Default: zmq.",
+    )
+    parser.add_argument(
         "--network-interface",
         type=str,
         default=None,
@@ -168,7 +177,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--task-name",
         type=str,
-        default="pick_apple",
+        default="test_0511",
         help="task file name for recording",
     )
     parser.add_argument(
@@ -217,8 +226,15 @@ if __name__ == "__main__":
             )
             listen_keyboard_thread.start()
 
-        # image client
-        img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
+        # image client — pick ZMQ (teleimager) or ROS 2 source
+        if args.camera_source == "ros":
+            from teleop.utils.ros_image_client import ROSImageClient
+
+            img_client = ROSImageClient()
+            logger_mp.info("[camera] using ROS 2 image source")
+        else:
+            img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
+            logger_mp.info(f"[camera] using ZMQ image source ({args.img_server_ip})")
         camera_config = img_client.get_cam_config()
         logger_mp.debug(f"Camera config: {camera_config}")
         # H2 uses pass-through display so never needs to push images to the XR headset,

@@ -1383,15 +1383,14 @@ class H2_ArmIK:
         self.Unit_Test = Unit_Test
         self.Visualization = Visualization
 
-        # fixed cache file path
         self.cache_path = "h2_model_cache.pkl"
 
         if not self.Unit_Test:
-            self.urdf_path = "../h2_description/H2.urdf"
-            self.model_dir = "../h2_description/"
+            self.urdf_path = "../assets/h2/H2.urdf"
+            self.model_dir = "../assets/h2/"
         else:
-            self.urdf_path = "../../h2_description/H2.urdf"
-            self.model_dir = "../../h2_description/"
+            self.urdf_path = "../../assets/h2/H2.urdf"
+            self.model_dir = "../../assets/h2/"
 
         # Try loading cache first
         if os.path.exists(self.cache_path) and (not self.Visualization):
@@ -1447,17 +1446,14 @@ class H2_ArmIK:
                 self.save_cache()
                 logger_mp.info(f">>> Cache saved to {self.cache_path}")
 
-        # Creating Casadi models and data for symbolic computing
         self.cmodel = cpin.Model(self.reduced_robot.model)
         self.cdata = self.cmodel.createData()
 
-        # Creating symbolic variables
         self.cq = casadi.SX.sym("q", self.reduced_robot.model.nq, 1)
         self.cTf_l = casadi.SX.sym("tf_l", 4, 4)
         self.cTf_r = casadi.SX.sym("tf_r", 4, 4)
         cpin.framesForwardKinematics(self.cmodel, self.cdata, self.cq)
 
-        # Get the hand joint ID and define the error function
         self.L_hand_id = self.reduced_robot.model.getFrameId("L_ee")
         self.R_hand_id = self.reduced_robot.model.getFrameId("R_ee")
 
@@ -1482,7 +1478,6 @@ class H2_ArmIK:
             ],
         )
 
-        # Defining the optimization problem
         self.opti = casadi.Opti()
         self.var_q = self.opti.variable(self.reduced_robot.model.nq)
         self.var_q_last = self.opti.parameter(self.reduced_robot.model.nq)  # for smooth
@@ -1490,88 +1485,9 @@ class H2_ArmIK:
         self.param_tf_r = self.opti.parameter(4, 4)
         self.translational_cost = casadi.sumsqr(self.translational_error(self.var_q, self.param_tf_l, self.param_tf_r))
         self.rotation_cost = casadi.sumsqr(self.rotational_error(self.var_q, self.param_tf_l, self.param_tf_r))
+        self.regularization_cost = casadi.sumsqr(self.var_q)
         self.smooth_cost = casadi.sumsqr(self.var_q - self.var_q_last)
 
-        lower = np.array(self.reduced_robot.model.lowerPositionLimit).reshape(-1)
-        upper = np.array(self.reduced_robot.model.upperPositionLimit).reshape(-1)
-        q_range = np.maximum(upper - lower, 1e-6)
-        q_nom = 0.5 * (lower + upper)
-
-        joint_names = [
-            "left_shoulder_pitch_joint",
-            "left_shoulder_roll_joint",
-            "left_shoulder_yaw_joint",
-            "left_elbow_joint",
-            "left_wrist_roll_joint",
-            "left_wrist_pitch_joint",
-            "left_wrist_yaw_joint",
-            "right_shoulder_pitch_joint",
-            "right_shoulder_roll_joint",
-            "right_shoulder_yaw_joint",
-            "right_elbow_joint",
-            "right_wrist_roll_joint",
-            "right_wrist_pitch_joint",
-            "right_wrist_yaw_joint",
-        ]
-        name_to_qidx = {}
-        for name in joint_names:
-            jid = self.reduced_robot.model.getJointId(name)
-            name_to_qidx[name] = int(self.reduced_robot.model.joints[jid].idx_q)
-        self.q_index_to_joint_name = [None] * self.reduced_robot.model.nq
-        for name, idx in name_to_qidx.items():
-            if 0 <= idx < len(self.q_index_to_joint_name):
-                self.q_index_to_joint_name[idx] = name
-
-        w_reg = np.ones(self.reduced_robot.model.nq, dtype=np.float64)
-        w_lim = np.ones(self.reduced_robot.model.nq, dtype=np.float64)
-        for wrist_name in [
-            "left_wrist_roll_joint",
-            "left_wrist_pitch_joint",
-            "left_wrist_yaw_joint",
-            "right_wrist_roll_joint",
-            "right_wrist_pitch_joint",
-            "right_wrist_yaw_joint",
-        ]:
-            w_reg[name_to_qidx[wrist_name]] = 6.0
-            w_lim[name_to_qidx[wrist_name]] = 10.0
-        for shoulder_roll_name in ["left_shoulder_roll_joint", "right_shoulder_roll_joint"]:
-            w_reg[name_to_qidx[shoulder_roll_name]] = max(w_reg[name_to_qidx[shoulder_roll_name]], 3.0)
-            w_lim[name_to_qidx[shoulder_roll_name]] = max(w_lim[name_to_qidx[shoulder_roll_name]], 3.0)
-
-        lower_dm = casadi.DM(lower)
-        upper_dm = casadi.DM(upper)
-        inv_range_dm = casadi.DM(1.0 / q_range)
-        q_nom_dm = casadi.DM(q_nom)
-        w_reg_sqrt_dm = casadi.DM(np.sqrt(w_reg))
-        w_lim_sqrt_dm = casadi.DM(np.sqrt(w_lim))
-
-        reg_vec = casadi.diag(w_reg_sqrt_dm) @ (casadi.diag(inv_range_dm) @ (self.var_q - q_nom_dm))
-        self.regularization_cost = casadi.sumsqr(reg_vec)
-
-        eps = 0.05
-        margin_lower = casadi.diag(inv_range_dm) @ (self.var_q - lower_dm)
-        margin_upper = casadi.diag(inv_range_dm) @ (upper_dm - self.var_q)
-        inv_lower = casadi.diag(w_lim_sqrt_dm) @ (1.0 / (margin_lower + eps))
-        inv_upper = casadi.diag(w_lim_sqrt_dm) @ (1.0 / (margin_upper + eps))
-        self.limit_cost = casadi.sumsqr(inv_lower) + casadi.sumsqr(inv_upper)
-
-        self._lower = lower
-        self._upper = upper
-        self._q_range = q_range
-        self._wrist_qidx = [
-            name_to_qidx[n]
-            for n in [
-                "left_wrist_roll_joint",
-                "left_wrist_pitch_joint",
-                "left_wrist_yaw_joint",
-                "right_wrist_roll_joint",
-                "right_wrist_pitch_joint",
-                "right_wrist_yaw_joint",
-            ]
-        ]
-        self._shoulder_roll_qidx = [name_to_qidx[n] for n in ["left_shoulder_roll_joint", "right_shoulder_roll_joint"]]
-
-        # Setting optimization constraints and goals
         self.opti.subject_to(
             self.opti.bounded(
                 self.reduced_robot.model.lowerPositionLimit,
@@ -1579,21 +1495,13 @@ class H2_ArmIK:
                 self.reduced_robot.model.upperPositionLimit,
             )
         )
-        self.opti.minimize(
-            50 * self.translational_cost
-            + self.rotation_cost
-            + 0.04 * self.regularization_cost
-            + 0.05 * self.smooth_cost
-            + 1e-4 * self.limit_cost
-        )
+        self.opti.minimize(50 * self.translational_cost + 0.8 * self.rotation_cost + 0.02 * self.regularization_cost + 0.1 * self.smooth_cost)
 
         opts = {
-            # CasADi-level options
             "expand": True,
             "detect_simple_bounds": True,
             "calc_lam_p": False,
             "print_time": False,
-            # IPOPT solver options
             "ipopt.sb": "yes",
             "ipopt.print_level": 0,
             "ipopt.max_iter": 30,
@@ -1607,34 +1515,14 @@ class H2_ArmIK:
         self.opti.solver("ipopt", opts)
 
         self.init_data = np.zeros(self.reduced_robot.model.nq)
-        self.smooth_filter = WeightedMovingFilter(np.array([0.6, 0.25, 0.1, 0.05]), 14)
+        self.smooth_filter = WeightedMovingFilter(np.array([0.4, 0.3, 0.2, 0.1]), 14)
         self.vis = None
-        self._stats = {
-            "step": 0,
-            "success": 0,
-            "fail": 0,
-            "seed_reset": 0,
-            "use_filtered": 0,
-            "use_raw": 0,
-            "last_dt_ms": 0.0,
-            "last_ok": False,
-            "last_min_margin_norm": 0.0,
-            "last_min_margin_joint": "",
-            "last_min_wrist_margin_norm": 0.0,
-            "last_min_wrist_joint": "",
-        }
 
         if self.Visualization:
-            # Initialize the Meshcat visualizer for visualization
-            self.vis = MeshcatVisualizer(
-                self.reduced_robot.model,
-                self.reduced_robot.collision_model,
-                self.reduced_robot.visual_model,
-            )
+            self.vis = MeshcatVisualizer(self.reduced_robot.model, self.reduced_robot.collision_model, self.reduced_robot.visual_model)
             self.vis.initViewer(open=True)
             self.vis.loadViewerModel("pinocchio")
-            # Frame ids might differ for H2, but not critical unless visualization is used.
-            # self.vis.displayFrames(True, frame_ids=[107, 108], axis_length = 0.15, axis_width = 5)
+            self.vis.displayFrames(True, frame_ids=[self.L_hand_id, self.R_hand_id], axis_length = 0.15, axis_width = 5)
             self.vis.display(pin.neutral(self.reduced_robot.model))
 
             frame_viz_names = ["L_ee_target", "R_ee_target"]
@@ -1690,13 +1578,7 @@ class H2_ArmIK:
         reduced_robot.data = reduced_robot.model.createData()
         return robot, reduced_robot
 
-    def scale_arms(
-        self,
-        human_left_pose,
-        human_right_pose,
-        human_arm_length=0.60,
-        robot_arm_length=0.75,
-    ):
+    def scale_arms(self, human_left_pose, human_right_pose, human_arm_length=0.60, robot_arm_length=0.75):
         scale_factor = robot_arm_length / human_arm_length
         robot_left_pose = human_left_pose.copy()
         robot_right_pose = human_right_pose.copy()
@@ -1711,15 +1593,8 @@ class H2_ArmIK:
         current_lr_arm_motor_q=None,
         current_lr_arm_motor_dq=None,
     ):
-        t0 = time.perf_counter()
-        seed_reset = False
         if current_lr_arm_motor_q is not None:
-            if self.init_data is None:
-                self.init_data = current_lr_arm_motor_q.copy()
-            else:
-                if np.max(np.abs(self.init_data - current_lr_arm_motor_q)) > 1.2:
-                    self.init_data = current_lr_arm_motor_q.copy()
-                    seed_reset = True
+            self.init_data = current_lr_arm_motor_q
         self.opti.set_initial(self.var_q, self.init_data)
 
         if self.Visualization:
@@ -1732,13 +1607,9 @@ class H2_ArmIK:
 
         try:
             sol = self.opti.solve()
-            raw_sol_q = self.opti.value(self.var_q)
-            self.smooth_filter.add_data(raw_sol_q)
-            use_filtered = np.max(np.abs(raw_sol_q - self.init_data)) < 0.2
-            if use_filtered:
-                sol_q = self.smooth_filter.filtered_data
-            else:
-                sol_q = raw_sol_q
+            sol_q = self.opti.value(self.var_q)
+            self.smooth_filter.add_data(sol_q)
+            sol_q = self.smooth_filter.filtered_data
 
             if current_lr_arm_motor_dq is not None:
                 v = current_lr_arm_motor_dq * 0.0
@@ -1757,19 +1628,13 @@ class H2_ArmIK:
             if self.Visualization:
                 self.vis.display(sol_q)
 
-            dt_ms = (time.perf_counter() - t0) * 1000.0
-            self._update_stats(sol_q, ok=True, dt_ms=dt_ms, seed_reset=seed_reset, use_filtered=use_filtered)
             return sol_q, sol_tauff
 
         except Exception as e:
             logger_mp.error(f"ERROR in convergence, plotting debug info.{e}")
-            raw_sol_q = self.opti.debug.value(self.var_q)
-            self.smooth_filter.add_data(raw_sol_q)
-            use_filtered = np.max(np.abs(raw_sol_q - self.init_data)) < 0.2
-            if use_filtered:
-                sol_q = self.smooth_filter.filtered_data
-            else:
-                sol_q = raw_sol_q
+            sol_q = self.opti.debug.value(self.var_q)
+            self.smooth_filter.add_data(sol_q)
+            sol_q = self.smooth_filter.filtered_data
 
             if current_lr_arm_motor_dq is not None:
                 v = current_lr_arm_motor_dq * 0.0
@@ -1791,54 +1656,7 @@ class H2_ArmIK:
             if self.Visualization:
                 self.vis.display(sol_q)
 
-            dt_ms = (time.perf_counter() - t0) * 1000.0
-            self._update_stats(sol_q, ok=False, dt_ms=dt_ms, seed_reset=seed_reset, use_filtered=use_filtered)
             return current_lr_arm_motor_q, np.zeros(self.reduced_robot.model.nv)
-
-    def _update_stats(self, sol_q, ok: bool, dt_ms: float, seed_reset: bool, use_filtered: bool):
-        sol_q = np.asarray(sol_q).reshape(-1)
-        margin = np.minimum(sol_q - self._lower, self._upper - sol_q)
-        margin_norm = margin / self._q_range
-        min_i = int(np.argmin(margin_norm))
-        min_name = self.q_index_to_joint_name[min_i] or f"q[{min_i}]"
-        wrist_margin_norm = margin_norm[self._wrist_qidx]
-        wrist_min_k = int(np.argmin(wrist_margin_norm))
-        wrist_min_i = int(self._wrist_qidx[wrist_min_k])
-        wrist_min_name = self.q_index_to_joint_name[wrist_min_i] or f"q[{wrist_min_i}]"
-
-        s = self._stats
-        s["step"] += 1
-        if ok:
-            s["success"] += 1
-        else:
-            s["fail"] += 1
-        if seed_reset:
-            s["seed_reset"] += 1
-        if use_filtered:
-            s["use_filtered"] += 1
-        else:
-            s["use_raw"] += 1
-        s["last_dt_ms"] = float(dt_ms)
-        s["last_ok"] = bool(ok)
-        s["last_min_margin_norm"] = float(margin_norm[min_i])
-        s["last_min_margin_joint"] = str(min_name)
-        s["last_min_wrist_margin_norm"] = float(wrist_margin_norm[wrist_min_k])
-        s["last_min_wrist_joint"] = str(wrist_min_name)
-
-    def get_stats(self):
-        return dict(self._stats)
-
-    def format_stats_line(self):
-        s = self._stats
-        total = max(1, int(s["step"]))
-        ok_rate = 100.0 * float(s["success"]) / float(total)
-        return (
-            f"IK {s['last_dt_ms']:.1f}ms {'OK' if s['last_ok'] else 'FAIL'} | "
-            f"ok {ok_rate:.0f}% | "
-            f"min {s['last_min_margin_norm']:.3f} {s['last_min_margin_joint']} | "
-            f"wrist {s['last_min_wrist_margin_norm']:.3f} {s['last_min_wrist_joint']} | "
-            f"seedReset {s['seed_reset']} filt {s['use_filtered']}/{total}"
-        )
 
 
 if __name__ == "__main__":

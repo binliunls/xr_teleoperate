@@ -194,6 +194,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ee",
         type=str,
+        default="sharpa",
         choices=["dex1", "dex3", "inspire_ftp", "inspire_dfx", "brainco", "sharpa"],
         help="Select end effector controller",
     )
@@ -260,25 +261,25 @@ if __name__ == "__main__":
     parser.add_argument(
         "--task-name",
         type=str,
-        default="test_0511",
+        default="assemble_trocar",
         help="task file name for recording",
     )
     parser.add_argument(
         "--task-goal",
         type=str,
-        default="pick_up_apple_and_place_in_tray.",
+        default="assemble_trocar.",
         help="task goal for recording at json file",
     )
     parser.add_argument(
         "--task-desc",
         type=str,
-        default="pick_up_apple_and_place_in_tray.",
+        default="assemble_the_trocar_and_place_it_on_the_table.",
         help="task description for recording at json file",
     )
     parser.add_argument(
         "--task-steps",
         type=str,
-        default="step1: pickup apple; step2: change hand; step3: place apple in tray;",
+        default="step1: pick left part, step2: pick right part, step3: assemble the trocar, step4: place the trocar on the table.",
         help="task steps for recording at json file",
     )
 
@@ -959,4 +960,3 @@ if __name__ == "__main__":
             logger_mp.error(f"Failed to close recorder: {e}")
         logger_mp.info("✅ Finally, exiting program.")
         exit(0)
-

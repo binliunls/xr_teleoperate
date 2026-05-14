@@ -1405,6 +1405,25 @@ class H2_ArmController:
         """Return current state dq of the left and right arm motors."""
         return np.array([self.lowstate_buffer.GetData().motor_state[id].dq for id in H2_JointArmIndex])
 
+    # Read-only waist API. The waist joints are NOT controllable from arm_sdk yet;
+    # these helpers exist so the recorder can include waist state in the dataset.
+    H2_WAIST_INDICES = (
+        H2_JointIndex.kWaistYaw,
+        H2_JointIndex.kWaistRoll,
+        H2_JointIndex.kWaistPitch,
+    )
+    H2_WAIST_JOINT_NAMES = ["waist_yaw", "waist_roll", "waist_pitch"]
+
+    def get_current_waist_q(self):
+        """Return current state q of waist joints [yaw, roll, pitch] (radians)."""
+        ms = self.lowstate_buffer.GetData().motor_state
+        return np.array([ms[i].q for i in self.H2_WAIST_INDICES])
+
+    def get_current_waist_dq(self):
+        """Return current state dq of waist joints [yaw, roll, pitch] (rad/s)."""
+        ms = self.lowstate_buffer.GetData().motor_state
+        return np.array([ms[i].dq for i in self.H2_WAIST_INDICES])
+
     def ctrl_dual_arm_go_home(self):
         """Move both the left and right arms of the robot to their home position by setting the target joint angles (q) and torques (tau) to zero."""
         logger_mp.info("[H2_ArmController] ctrl_dual_arm_go_home start...")

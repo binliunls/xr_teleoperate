@@ -257,6 +257,23 @@ if __name__ == "__main__":
     )
     # record mode and task info
     parser.add_argument("--record", action="store_true", help="Enable data recording mode")
+    # H2 only: include the 3 waist joints (yaw, roll, pitch) in body state/action.
+    # On by default — pass --no-record-waist to suppress. Waist is read-only on the
+    # current hardware; the recorded "action" mirrors state (same pattern as sharpa ee).
+    _waist_group = parser.add_mutually_exclusive_group()
+    _waist_group.add_argument(
+        "--record-waist",
+        dest="record_waist",
+        action="store_true",
+        default=True,
+        help="H2 only: record waist (yaw/roll/pitch) under body.qpos for state and action. Default: on.",
+    )
+    _waist_group.add_argument(
+        "--no-record-waist",
+        dest="record_waist",
+        action="store_false",
+        help="Disable waist recording for H2.",
+    )
     parser.add_argument("--task-dir", type=str, default="./utils/data/", help="path to save data")
     parser.add_argument(
         "--task-name",
@@ -537,9 +554,13 @@ if __name__ == "__main__":
                     "left_pinky_DIP",
                 ]
                 _sharpa_right_joint_names = [n.replace("left_", "right_") for n in _sharpa_left_joint_names]
+                _body_joint_names = None
+                if args.arm == "H2" and args.record_waist:
+                    _body_joint_names = list(H2_ArmController.H2_WAIST_JOINT_NAMES)
                 recorder.set_ee_metadata(
                     left_joint_names=_sharpa_left_joint_names,
                     right_joint_names=_sharpa_right_joint_names,
+                    body_joint_names=_body_joint_names,
                 )
 
         logger_mp.info("----------------------------------------------------------------")
@@ -786,6 +807,11 @@ if __name__ == "__main__":
                     right_hand_action = []
                     current_body_state = []
                     current_body_action = []
+
+                # H2 waist (yaw, roll, pitch) — recorded under body.qpos for state only.
+                # Hardware is read-only for waist (no SDK control), so action stays empty.
+                if args.arm == "H2" and args.record_waist:
+                    current_body_state = arm_ctrl.get_current_waist_q().tolist()
 
                 # arm state and action
                 left_arm_state = current_lr_arm_q[:7]

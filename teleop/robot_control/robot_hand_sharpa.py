@@ -195,6 +195,13 @@ class SharpaTactile_Subscriber:
                     except Exception as e:
                         logger_mp.warning(f"[SharpaTactile] decode failed: {e}")
                         continue
+                    # Defensive: a malformed channel would crash snapshot() later,
+                    # not here. Drop it now and log so the recorder loop stays alive.
+                    if not (0 <= msg.channel < wire.NUM_CHANNELS):
+                        logger_mp.warning(
+                            f"[SharpaTactile] drop msg with bad channel={msg.channel}"
+                        )
+                        continue
                     with self._lock:
                         self._cache[msg.channel] = msg
         finally:

@@ -408,9 +408,11 @@ int main(int argc, char* argv[]) {
     disconnect_hand(right_hand, "right");
     sharpa::SharpaWaveManager::get_instance().disconnect_all();
 
-    // Drop the tactile publisher only after hands are stopped so no callback
-    // races against socket destruction.
-    g_tactile_pub.reset();
+    // Intentionally NOT resetting g_tactile_pub here: the SDK does not document
+    // whether hand.stop() drains in-flight tactile callbacks, so a callback
+    // mid-publish() could still be holding the publisher's mutex when we
+    // destroy it. The OS reclaims the socket and ZMQ context at process exit
+    // — simpler and trivially race-free.
 
     return 0;
 }

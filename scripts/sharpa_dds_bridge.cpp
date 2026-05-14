@@ -24,9 +24,12 @@
 
 #include <SharpaWaveSDK.h>
 
+#include <zmq.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -47,6 +50,82 @@ using namespace unitree::robot;
 using unitree_hg::msg::dds_::HandCmd_;
 using unitree_hg::msg::dds_::HandState_;
 using unitree_hg::msg::dds_::MotorState_;
+
+// ── tactile ZMQ publisher ─────────────────────────────────────────────────────
+//
+// One PUB socket shared by all hands. Per fingertip frame, packs DEFORM + F6 +
+// CONTACT_POINT into a 28-byte little-endian header + raw payload and sends as
+// one ZMQ message. RAW is intentionally dropped — the workstation recorder
+// doesn't need it and it would ~3× the bandwidth.
+//
+// Wire format mirrors teleop/utils/sharpa_tactile_wire.py:
+//   u32 channel | u32 frame_id | f64 ts | u32 dlen | u32 flen | u32 cplen | bytes...
+//
+// SDK fires tactile callbacks from its own thread(s); 2 hands × 5 channels can
+// race on the socket, so send() is mutex-guarded. ZMQ sockets are NOT
+// thread-safe on their own.
+
+class TactilePublisher {
+public:
+    explicit TactilePublisher(int port)
+        : ctx_(1), sock_(ctx_, zmq::socket_type::pub) {
+        sock_.set(zmq::sockopt::sndhwm, 100);
+        sock_.set(zmq::sockopt::linger, 0);
+        const std::string addr = "tcp://*:" + std::to_string(port);
+        sock_.bind(addr);
+        std::cout << "[tactile] PUB " << addr << " ready\n";
+    }
+
+    void publish(sharpa::tactile::Frame::Ptr fr) {
+        if (!fr) return;
+        auto find_block = [&](const char* key) -> sharpa::tactile::DataBlock::Ptr {
+            auto it = fr->content.find(key);
+            return (it != fr->content.end()) ? it->second : nullptr;
+        };
+        auto d_blk  = find_block("DEFORM");
+        auto f_blk  = find_block("F6");
+        auto cp_blk = find_block("CONTACT_POINT");
+
+        const size_t d_len  = (d_blk  && d_blk->data())  ? d_blk->nbytes()  : 0;
+        const size_t f_len  = (f_blk  && f_blk->data())  ? f_blk->nbytes()  : 0;
+        const size_t cp_len = (cp_blk && cp_blk->data()) ? cp_blk->nbytes() : 0;
+
+        constexpr size_t HEADER = 28;
+        std::vector<uint8_t> buf(HEADER + d_len + f_len + cp_len);
+        const uint32_t channel  = static_cast<uint32_t>(fr->channel);
+        const uint32_t frame_id = static_cast<uint32_t>(fr->frame_id);
+        const double   ts       = fr->ts;
+        const uint32_t dlen32   = static_cast<uint32_t>(d_len);
+        const uint32_t flen32   = static_cast<uint32_t>(f_len);
+        const uint32_t cplen32  = static_cast<uint32_t>(cp_len);
+        std::memcpy(buf.data() +  0, &channel,  4);
+        std::memcpy(buf.data() +  4, &frame_id, 4);
+        std::memcpy(buf.data() +  8, &ts,       8);
+        std::memcpy(buf.data() + 16, &dlen32,   4);
+        std::memcpy(buf.data() + 20, &flen32,   4);
+        std::memcpy(buf.data() + 24, &cplen32,  4);
+
+        uint8_t* body = buf.data() + HEADER;
+        if (d_len)  { std::memcpy(body, d_blk->data(),  d_len);  body += d_len;  }
+        if (f_len)  { std::memcpy(body, f_blk->data(),  f_len);  body += f_len;  }
+        if (cp_len) { std::memcpy(body, cp_blk->data(), cp_len); }
+
+        zmq::message_t msg(buf.data(), buf.size());
+        std::lock_guard<std::mutex> lk(mu_);
+        try {
+            sock_.send(msg, zmq::send_flags::none);
+        } catch (const zmq::error_t&) {
+            // socket closing during shutdown — drop quietly.
+        }
+    }
+
+private:
+    zmq::context_t ctx_;
+    zmq::socket_t  sock_;
+    std::mutex     mu_;
+};
+
+static std::unique_ptr<TactilePublisher> g_tactile_pub;
 
 // ── hand bridge ───────────────────────────────────────────────────────────────
 
@@ -181,6 +260,15 @@ static sharpa::SharpaWave& connect_hand(const std::string& side, float speed,
     check("set_current_coeff",  hand.set_current_coeff(0.6f));
     check("set_control_source", hand.set_control_source(sharpa::ControlSource::SDK));
 
+    // Register tactile callback BEFORE hand.start() so we don't miss the first
+    // frames (matches the SDK sample at SDK_500/sample/c++/sharpa_tactile_callback.cc:133).
+    // Drops RAW; sends DEFORM + F6 + CONTACT_POINT over ZMQ to the workstation recorder.
+    if (g_tactile_pub) {
+        hand.set_tactile_callback([](sharpa::tactile::Frame::Ptr fr) {
+            if (g_tactile_pub) g_tactile_pub->publish(fr);
+        });
+    }
+
     if (!hand.start())
         throw std::runtime_error("[" + side + "] start() returned false");
 
@@ -229,11 +317,12 @@ static void on_signal(int) { g_running = false; }
 
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog
-              << " [--speed FLOAT] [--state-hz FLOAT] [--side left|right|both] [--tactile]\n"
+              << " [--speed FLOAT] [--state-hz FLOAT] [--side left|right|both] [--tactile] [--tactile-port N]\n"
               << "  --speed FLOAT    hand speed coefficient (default: 0.5)\n"
               << "  --state-hz FLOAT state publish rate Hz (default: 50)\n"
               << "  --side STR       which hand(s) to bridge: left, right, or both (default: both)\n"
-              << "  --tactile        keep device-side tactile JPEG stream on (default: off; ~30 Mb/s per hand)\n";
+              << "  --tactile        keep device-side tactile JPEG stream on (default: off; ~30 Mb/s per hand)\n"
+              << "  --tactile-port N publish DEFORM+F6+CONTACT_POINT over ZMQ PUB on this port (default: 7779; 0 to disable)\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -241,6 +330,7 @@ int main(int argc, char* argv[]) {
     float state_hz = 50.0f;
     std::string side = "both";
     bool enable_tactile = false;
+    int  tactile_port = 7779;
 
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--speed") && i + 1 < argc)
@@ -251,6 +341,8 @@ int main(int argc, char* argv[]) {
             side = argv[++i];
         else if (!std::strcmp(argv[i], "--tactile"))
             enable_tactile = true;
+        else if (!std::strcmp(argv[i], "--tactile-port") && i + 1 < argc)
+            tactile_port = std::stoi(argv[++i]);
         else { print_usage(argv[0]); return 1; }
     }
 
@@ -265,6 +357,19 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, on_signal);
 
     ChannelFactory::Instance()->Init(0);
+
+    // Bring up the tactile ZMQ publisher BEFORE connecting hands so that the
+    // per-hand callback registration (inside connect_hand) sees a live socket.
+    if (tactile_port > 0) {
+        try {
+            g_tactile_pub = std::make_unique<TactilePublisher>(tactile_port);
+        } catch (const std::exception& e) {
+            std::cerr << "[tactile] failed to bind PUB port " << tactile_port
+                      << ": " << e.what() << " — continuing without tactile ZMQ\n";
+        }
+    } else {
+        std::cout << "[tactile] ZMQ publisher disabled (--tactile-port 0)\n";
+    }
 
     sharpa::SharpaWave* left_hand  = nullptr;
     sharpa::SharpaWave* right_hand = nullptr;
@@ -302,6 +407,10 @@ int main(int argc, char* argv[]) {
     disconnect_hand(left_hand,  "left");
     disconnect_hand(right_hand, "right");
     sharpa::SharpaWaveManager::get_instance().disconnect_all();
+
+    // Drop the tactile publisher only after hands are stopped so no callback
+    // races against socket destruction.
+    g_tactile_pub.reset();
 
     return 0;
 }

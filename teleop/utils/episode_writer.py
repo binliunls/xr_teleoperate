@@ -70,6 +70,7 @@ class EpisodeWriter():
                 "author": "unitree" if author is None else author,
                 "image": {"width":self.image_size[0], "height":self.image_size[1], "fps":self.frequency},
                 "depth": {"width":self.image_size[0], "height":self.image_size[1], "fps":self.frequency},
+                "tactile": {"width": 240, "height": 240, "channels": 1, "fps": self.frequency, "format": "PNG"},
                 "audio": {"sample_rate": 16000, "channels": 1, "format":"PCM", "bits":16},    # PCM_S16
                 "joint_names":{
                     "left_arm":   [],
@@ -119,11 +120,13 @@ class EpisodeWriter():
         self.color_dir = os.path.join(self.episode_dir, 'colors')
         self.depth_dir = os.path.join(self.episode_dir, 'depths')
         self.audio_dir = os.path.join(self.episode_dir, 'audios')
+        self.tactile_dir = os.path.join(self.episode_dir, 'tactiles')
         self.json_path = os.path.join(self.episode_dir, 'data.json')
         os.makedirs(self.episode_dir, exist_ok=True)
         os.makedirs(self.color_dir, exist_ok=True)
         os.makedirs(self.depth_dir, exist_ok=True)
         os.makedirs(self.audio_dir, exist_ok=True)
+        os.makedirs(self.tactile_dir, exist_ok=True)
         with open(self.json_path, "w", encoding="utf-8") as f:
             f.write('{\n')
             f.write('"info": ' + json.dumps(self.info, ensure_ascii=False, indent=4) + ',\n')
@@ -193,6 +196,23 @@ class EpisodeWriter():
                 if not cv2.imwrite(os.path.join(self.depth_dir, depth_name), depth):
                     logger_mp.info(f"Failed to save depth image.")
                 item_data['depths'][depth_key] = os.path.join('depths', depth_name)
+
+        # Save tactile deformation maps as lossless PNG (signal is sparse uint8,
+        # JPEG would smear contact edges and corrupt the SaTA encoder input).
+        # F6 + CONTACT_POINT + ts + frame_id stay inline in the JSON.
+        tactiles = item_data.get('tactiles')
+        if tactiles:
+            for hand_key, fingers in tactiles.items():
+                if not fingers:
+                    continue
+                for finger_name, entry in fingers.items():
+                    deform = entry.get('deform') if isinstance(entry, dict) else None
+                    if deform is None:
+                        continue
+                    name = f'{str(idx).zfill(6)}_{hand_key}_{finger_name}_deform.png'
+                    if not cv2.imwrite(os.path.join(self.tactile_dir, name), deform):
+                        logger_mp.info(f"Failed to save tactile image.")
+                    entry['deform'] = os.path.join('tactiles', name)
 
         # Save audios
         if audios:

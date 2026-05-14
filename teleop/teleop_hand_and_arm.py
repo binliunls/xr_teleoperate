@@ -206,6 +206,19 @@ if __name__ == "__main__":
         "(bridge on Thor or retargeting daemon). Default: 0.",
     )
     parser.add_argument(
+        "--sharpa-tactile-host",
+        type=str,
+        default="127.0.0.1",
+        help="Hostname/IP of the Sharpa tactile ZMQ publisher (the bridge on Thor, "
+        "or 127.0.0.1 when running sharpa_tactile_sim.py locally).",
+    )
+    parser.add_argument(
+        "--sharpa-tactile-port",
+        type=int,
+        default=7779,
+        help="Sharpa tactile ZMQ port — must match the bridge's --tactile-port.",
+    )
+    parser.add_argument(
         "--img-server-ip",
         type=str,
         default="192.168.124.162",
@@ -455,8 +468,10 @@ if __name__ == "__main__":
         elif args.ee == "sharpa":
             from teleop.robot_control.robot_hand_sharpa import (
                 SharpaWave_Controller,
+                SharpaTactile_Subscriber,
                 SHARPA_DOF,
             )
+            from teleop.utils.sharpa_tactile_wire import FINGER_NAMES as SHARPA_FINGER_NAMES
 
             dual_hand_data_lock = Lock()
             dual_hand_state_array = Array("d", 2 * SHARPA_DOF, lock=False)
@@ -540,7 +555,17 @@ if __name__ == "__main__":
                 recorder.set_ee_metadata(
                     left_joint_names=_sharpa_left_joint_names,
                     right_joint_names=_sharpa_right_joint_names,
+                    left_tactile_names=list(SHARPA_FINGER_NAMES),
+                    right_tactile_names=list(SHARPA_FINGER_NAMES),
                 )
+                tactile_sub = SharpaTactile_Subscriber(
+                    host=args.sharpa_tactile_host,
+                    port=args.sharpa_tactile_port,
+                )
+            else:
+                tactile_sub = None
+        else:
+            tactile_sub = None
 
         logger_mp.info("----------------------------------------------------------------")
         logger_mp.info("�  Press [c] on keyboard to calibrate (recommended before starting).")
@@ -884,6 +909,7 @@ if __name__ == "__main__":
                             "qpos": current_body_action,
                         },
                     }
+                    tactiles = tactile_sub.snapshot() if tactile_sub is not None else None
                     if args.sim:
                         sim_state = sim_state_subscriber.read_data()
                         recorder.add_item(
@@ -891,6 +917,7 @@ if __name__ == "__main__":
                             depths=depths,
                             states=states,
                             actions=actions,
+                            tactiles=tactiles,
                             sim_state=sim_state,
                         )
                     else:
@@ -899,6 +926,7 @@ if __name__ == "__main__":
                             depths=depths,
                             states=states,
                             actions=actions,
+                            tactiles=tactiles,
                         )
 
             current_time = time.time()

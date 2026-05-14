@@ -66,6 +66,7 @@ LDFLAGS := \
     -L$(SHARPA_LIB_DIR)    -lsharpa-wave-sdk \
     -Wl,-rpath,$(UNITREE_THIRD_DIR) \
     -Wl,-rpath,$(SHARPA_LIB_DIR) \
+    -lzmq \
     -lpthread
 
 TARGET := sharpa_dds_bridge

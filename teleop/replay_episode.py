@@ -39,7 +39,7 @@ ARM_SLICE = slice(0, 14)  # left(0:7) + right(7:14) arm joints
 LEFT_EE_SLICE = slice(14, 36)  # left  Sharpa hand 22 DOF
 RIGHT_EE_SLICE = slice(36, 58)  # right Sharpa hand 22 DOF
 
-SHARPA_SDK_PATH = os.path.expanduser("~/Sharpa/SharpaWaveSDK_4.6.6/python")
+SHARPA_SDK_PATH = os.environ.get("SHARPA_SDK_PATH", "/usr/lib/sharpa-wave-sdk/python")
 UNITREE_SDK_PATH = os.path.expanduser("~/unitree_sdk2_python")
 
 

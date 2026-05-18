@@ -1207,8 +1207,8 @@ class H2_JointIndex(IntEnum):
     kRightWristYaw = 28
 
     # Head
-    kHeadPitch = 29
-    kHeadYaw = 30
+    kHeadPitch = 29  # -0.523 ~ 0.837
+    kHeadYaw = 30  # -1.745 ~ 1.745
 
     # not used
     kNotUsedJoint0 = 31
@@ -1219,7 +1219,14 @@ class H2_JointIndex(IntEnum):
 
 class H2_ArmController:
     def __init__(
-        self, motion_mode=False, simulation_mode=False, kp_low=None, kp_wrist=None, kd_low=None, kd_wrist=None
+        self,
+        motion_mode=False,
+        simulation_mode=False,
+        kp_low=None,
+        kp_wrist=None,
+        kd_low=None,
+        kd_wrist=None,
+        head_pitch_home=0.0,
     ):
         logger_mp.info("Initialize H2_ArmController...")
         self.q_target = np.zeros(14)
@@ -1235,7 +1242,11 @@ class H2_ArmController:
 
         self.all_motor_q = None
         self.arm_velocity_limit = 20.0
+        self.head_velocity_limit = 5.0  # rad/s; slower than arms to avoid snapping
         self.control_dt = 1.0 / 250.0
+
+        self.head_pitch_home = head_pitch_home
+        # Initialized to current motor position after all_motor_q is read (below)
 
         self._speed_gradual_max = False
         self._gradual_start_time = None
@@ -1267,6 +1278,8 @@ class H2_ArmController:
         self.msg.mode_machine = self.get_mode_machine()
 
         self.all_motor_q = self.get_current_motor_q()
+        # Fixed head pose; clip_head_q_target rate-limits the move so it won't snap.
+        self.head_q_target = np.array([self.head_pitch_home, 0.0])
         logger_mp.debug(f"Current all body motor state q:\n{self.all_motor_q} \n")
         logger_mp.debug(f"Current two arms motor state q:\n{self.get_current_dual_arm_q()}\n")
         logger_mp.info("Lock all joints except two arms...")
@@ -1320,6 +1333,17 @@ class H2_ArmController:
         cliped_arm_q_target = current_q + delta / max(motion_scale, 1.0)
         return cliped_arm_q_target
 
+    def clip_head_q_target(self, target_q):
+        current_q = np.array(
+            [
+                self.lowstate_buffer.GetData().motor_state[H2_JointIndex.kHeadPitch].q,
+                self.lowstate_buffer.GetData().motor_state[H2_JointIndex.kHeadYaw].q,
+            ]
+        )
+        delta = target_q - current_q
+        motion_scale = np.max(np.abs(delta)) / (self.head_velocity_limit * self.control_dt)
+        return current_q + delta / max(motion_scale, 1.0)
+
     def _ctrl_motor_state(self):
         while True:
             start_time = time.time()
@@ -1327,11 +1351,14 @@ class H2_ArmController:
             with self.ctrl_lock:
                 arm_q_target = self.q_target
                 arm_tauff_target = self.tauff_target
+                head_q = self.head_q_target.copy()
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
+                clipped_head_q = head_q
             else:
                 cliped_arm_q_target = self.clip_arm_q_target(arm_q_target, velocity_limit=self.arm_velocity_limit)
+                clipped_head_q = self.clip_head_q_target(head_q)
 
             if self.motion_mode:
                 self.msg.motor_cmd[H2_JointIndex.kNotUsedJoint0].q = 1.0
@@ -1340,6 +1367,9 @@ class H2_ArmController:
                 self.msg.motor_cmd[id].q = cliped_arm_q_target[idx]
                 self.msg.motor_cmd[id].dq = 0
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]
+
+            self.msg.motor_cmd[H2_JointIndex.kHeadPitch].q = clipped_head_q[0]
+            self.msg.motor_cmd[H2_JointIndex.kHeadYaw].q = clipped_head_q[1]
 
             self.msg.crc = self.crc.Crc(self.msg)
             self.lowcmd_publisher.Write(self.msg)
@@ -1375,13 +1405,33 @@ class H2_ArmController:
         """Return current state dq of the left and right arm motors."""
         return np.array([self.lowstate_buffer.GetData().motor_state[id].dq for id in H2_JointArmIndex])
 
+    # Read-only waist API. The waist joints are NOT controllable from arm_sdk yet;
+    # these helpers exist so the recorder can include waist state in the dataset.
+    H2_WAIST_INDICES = (
+        H2_JointIndex.kWaistYaw,
+        H2_JointIndex.kWaistRoll,
+        H2_JointIndex.kWaistPitch,
+    )
+    H2_WAIST_JOINT_NAMES = ["waist_yaw", "waist_roll", "waist_pitch"]
+
+    def get_current_waist_q(self):
+        """Return current state q of waist joints [yaw, roll, pitch] (radians)."""
+        ms = self.lowstate_buffer.GetData().motor_state
+        return np.array([ms[i].q for i in self.H2_WAIST_INDICES])
+
+    def get_current_waist_dq(self):
+        """Return current state dq of waist joints [yaw, roll, pitch] (rad/s)."""
+        ms = self.lowstate_buffer.GetData().motor_state
+        return np.array([ms[i].dq for i in self.H2_WAIST_INDICES])
+
     def ctrl_dual_arm_go_home(self):
         """Move both the left and right arms of the robot to their home position by setting the target joint angles (q) and torques (tau) to zero."""
         logger_mp.info("[H2_ArmController] ctrl_dual_arm_go_home start...")
         max_attempts = 100
-        current_attempts = 0
         with self.ctrl_lock:
             self.q_target = np.zeros(14)
+            self.head_q_target = np.array([self.head_pitch_home, 0.0])
+        current_attempts = 0
         tolerance = 0.05
         while current_attempts < max_attempts:
             current_q = self.get_current_dual_arm_q()
@@ -1390,10 +1440,6 @@ class H2_ArmController:
                 break
             current_attempts += 1
             time.sleep(0.05)
-        if self.motion_mode:
-            for weight in np.linspace(1, 0, num=101):
-                self.msg.motor_cmd[H2_JointIndex.kNotUsedJoint0].q = weight
-                time.sleep(0.02)
 
     def speed_gradual_max(self, t=5.0):
         self._gradual_start_time = time.time()
@@ -1417,6 +1463,9 @@ class H2_ArmController:
             H2_JointIndex.kRightShoulderRoll.value,
             H2_JointIndex.kRightShoulderYaw.value,
             H2_JointIndex.kRightElbow.value,
+            # Head — small motors; high gains cause snapping
+            H2_JointIndex.kHeadPitch.value,
+            H2_JointIndex.kHeadYaw.value,
         ]
         return motor_index.value in weak_motors
 

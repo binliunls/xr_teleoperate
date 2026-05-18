@@ -191,3 +191,119 @@ is free to move.
    Watch for `[diag] mocap_frames_seen=N left_pushed=N right_pushed=N` log
    lines confirming end-to-end flow. If `mocap_frames_seen=0`, the Manus
    software on the workstation is not publishing — check that side first.
+
+## 10. Convert Unitree dataset to LeRobot
+
+Once you have one or more recorded datasets under `~/datasets/`, convert them
+to the LeRobot format. The converter reads everything under `~/datasets/` and
+writes the result to `~/lerobot/`, so make sure **both** `~/datasets/` (the
+intended source) and `~/lerobot/` are in the expected state first — typically
+`~/lerobot/` should be empty (or removed) before each run so a clean dataset
+is written.
+
+```bash
+conda activate tv
+cd ~/binliu/unitree_lerobot
+# (optional) wipe previous output:
+rm -rf ~/lerobot
+bash convert.sh
+```
+
+Result: a v2.x LeRobot dataset at `~/lerobot/` with `data/`, `images/`,
+`videos/`, and `meta/` subdirectories.
+
+If you want waist (`body.qpos`) included in state only, edit `convert.sh` to
+pass `--include-waist-state`.
+
+## 11. Upload converted dataset to Hugging Face
+
+Push the LeRobot dataset under a named sub-folder of a Hub repo:
+
+```bash
+python -m unitree_lerobot.utils.upload_lerobot_dataset \
+    --local-path ~/lerobot \
+    --repo-id nvidia/orca-template1-dev \
+    --path-in-repo <your_dataset_name>
+```
+
+Pick `<your_dataset_name>` to be descriptive and unique, e.g.
+`0512_1751_liming_collection`. The sub-folder is created automatically on
+the Hub if it doesn't exist; re-running uploads only new/changed files.
+
+Auth: pass `--token`, or set `$HF_TOKEN`, or `huggingface-cli login` once.
+
+## 12. Download a trained model from Hugging Face
+
+```bash
+conda activate tv
+cd ~/binliu/ORCA-Galbot/utils
+python hf_download.py nvidia/orca-h2-dev \
+    --subdir assemble_trocar \
+    --exclude "*/global*/*" \
+    --exclude "*/*/global*/*" \
+    --local-dir /home/nvidia/models/
+```
+
+Replace `--subdir` with the model bundle you want. The two `--exclude`
+patterns skip checkpoint shards under a `global*` folder (LFS-heavy and
+not needed for inference).
+
+## 13. Start the GR00T policy server
+
+GR00T runs in its own uv-managed environment. In a fresh terminal:
+
+```bash
+cd ~/binliu/Isaac-GR00T
+uv run python gr00t/eval/run_gr00t_server.py \
+    --model-path /home/nvidia/models/assemble_trocar/0512-101data-bs256-tune-visual-checkpoint-29400/ \
+    --embodiment-tag new_embodiment \
+    --port 5555
+```
+
+Adjust `--model-path` to whichever checkpoint you downloaded in step 12.
+The server listens on `tcp://localhost:5555` over ZMQ + msgpack and stays up
+until you Ctrl-C.
+
+## 14. Run inference
+
+With the bridge, cameras, and GR00T server already up, launch the inference
+wrapper from `unitree_lerobot`:
+
+```bash
+cd ~/binliu/unitree_lerobot/unitree_lerobot/eval_robot
+bash run_eval_h2_groot.sh "assemble_the_trocar_and_place_it_on_the_table." 640
+```
+
+Two positional args: **task description** and **total steps per episode**
+(here, 640 frames at 30 Hz ≈ 21 s per episode).
+
+If you have an init-posture YAML, point the wrapper at it so each episode
+starts from the recorded average starting pose:
+
+```bash
+bash run_eval_h2_groot.sh "assemble_the_trocar_and_place_it_on_the_table." 640 \
+    --init-state-yaml <your_init_file> \
+    --init-state-hold-s 5
+```
+
+Alternatively, set the env var `INIT_STATE_YAML=<path>` once and the
+wrapper picks it up automatically.
+
+## 15. Generate an init-posture YAML (one-time, optional)
+
+To build an init-posture file from your recorded training data — averages
+the first N frames of `states.*.qpos` across every episode in the given
+dataset(s):
+
+```bash
+bash teleop/utils/run_compute_average_initial_state.sh \
+    ~/Assemble_trocar_h2_sharpa/assemble_trocar_05121740 \
+    ~/Assemble_trocar_h2_sharpa/assemble_trocar_05121948 \
+    -- --first-n 3 \
+       --output ~/binliu/unitree_lerobot/unitree_lerobot/eval_robot/init_post_0512.yaml
+```
+
+Pass as many dataset directories as you want before the `--` separator —
+they are pooled into a single average. `--first-n 3` says "use the first 3
+frames of every episode." Plug the resulting YAML into step 14 with
+`--init-state-yaml`.

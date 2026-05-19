@@ -192,6 +192,15 @@ if __name__ == "__main__":
         help="Select arm controller",
     )
     parser.add_argument(
+        "--arm-side",
+        type=str,
+        choices=["left", "right", "both"],
+        default="both",
+        help="Which arm(s) to teleoperate. The disabled arm is pinned at its "
+        "calibration initial pose so it stays mechanically static (useful for "
+        "single-arm data collection). Default: both arms active.",
+    )
+    parser.add_argument(
         "--ee",
         type=str,
         default="sharpa",
@@ -717,16 +726,26 @@ if __name__ == "__main__":
             current_lr_arm_q = arm_ctrl.get_current_dual_arm_q()
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
 
-            left_target_pose = _compute_relative_target_pose(
-                tele_data.left_wrist_pose,
-                REF_LEFT_WRIST_POSE,
-                INIT_LEFT_TARGET_POSE,
-            )
-            right_target_pose = _compute_relative_target_pose(
-                tele_data.right_wrist_pose,
-                REF_RIGHT_WRIST_POSE,
-                INIT_RIGHT_TARGET_POSE,
-            )
+            # --arm-side semantics: the disabled arm keeps targeting its calibrated
+            # init pose every tick, so the IK solver resolves it to a constant joint
+            # configuration. Mechanically the arm holds still; the recording captures
+            # constant values for the disabled side instead of operator drift.
+            if args.arm_side in ("left", "both"):
+                left_target_pose = _compute_relative_target_pose(
+                    tele_data.left_wrist_pose,
+                    REF_LEFT_WRIST_POSE,
+                    INIT_LEFT_TARGET_POSE,
+                )
+            else:
+                left_target_pose = INIT_LEFT_TARGET_POSE
+            if args.arm_side in ("right", "both"):
+                right_target_pose = _compute_relative_target_pose(
+                    tele_data.right_wrist_pose,
+                    REF_RIGHT_WRIST_POSE,
+                    INIT_RIGHT_TARGET_POSE,
+                )
+            else:
+                right_target_pose = INIT_RIGHT_TARGET_POSE
 
             # solve ik using motor data and wrist pose, then use ik results to control arms.
             time_ik_start = time.time()

@@ -42,22 +42,28 @@ ARCH ?= $(shell uname -m)
 #   2. Installed package:  include/, include/ddscxx/, lib/, lib/   (flat, no arch subdir)
 # Auto-detect by checking whether thirdparty/ exists; user can override any of these.
 ifneq ($(wildcard $(UNITREE_SDK2_DIR)/thirdparty/.),)
-  # Source-tree layout
-  UNITREE_INC_DIR   ?= $(UNITREE_SDK2_DIR)/include
-  UNITREE_THIRD_INC ?= $(UNITREE_SDK2_DIR)/thirdparty/include
-  UNITREE_LIB_DIR   ?= $(UNITREE_SDK2_DIR)/lib/$(ARCH)
-  UNITREE_THIRD_DIR ?= $(UNITREE_SDK2_DIR)/thirdparty/lib/$(ARCH)
+  # Source-tree layout. The C++ headers live under thirdparty/include/ddscxx/
+  # (dds/dds.hpp etc.) and the C headers live alongside at thirdparty/include/
+  # (dds/dds.h etc.). Both must be on the include path.
+  UNITREE_INC_DIR        ?= $(UNITREE_SDK2_DIR)/include
+  UNITREE_THIRD_INC      ?= $(UNITREE_SDK2_DIR)/thirdparty/include
+  UNITREE_THIRD_INC_CXX  ?= $(UNITREE_SDK2_DIR)/thirdparty/include/ddscxx
+  UNITREE_LIB_DIR        ?= $(UNITREE_SDK2_DIR)/lib/$(ARCH)
+  UNITREE_THIRD_DIR      ?= $(UNITREE_SDK2_DIR)/thirdparty/lib/$(ARCH)
 else
-  # Installed-package layout (e.g. /opt/unitree_robotics)
-  UNITREE_INC_DIR   ?= $(UNITREE_SDK2_DIR)/include
-  UNITREE_THIRD_INC ?= $(UNITREE_SDK2_DIR)/include/ddscxx
-  UNITREE_LIB_DIR   ?= $(UNITREE_SDK2_DIR)/lib
-  UNITREE_THIRD_DIR ?= $(UNITREE_SDK2_DIR)/lib
+  # Installed-package layout (e.g. /opt/unitree_robotics). C++ headers under
+  # include/ddscxx/, C headers under include/ (same dir as the main SDK).
+  UNITREE_INC_DIR        ?= $(UNITREE_SDK2_DIR)/include
+  UNITREE_THIRD_INC      ?= $(UNITREE_SDK2_DIR)/include
+  UNITREE_THIRD_INC_CXX  ?= $(UNITREE_SDK2_DIR)/include/ddscxx
+  UNITREE_LIB_DIR        ?= $(UNITREE_SDK2_DIR)/lib
+  UNITREE_THIRD_DIR      ?= $(UNITREE_SDK2_DIR)/lib
 endif
 
 INCLUDES := \
     -I$(UNITREE_INC_DIR) \
     -I$(UNITREE_THIRD_INC) \
+    -I$(UNITREE_THIRD_INC_CXX) \
     -I$(SHARPA_INCLUDE_DIR)
 
 LDFLAGS := \

@@ -26,6 +26,7 @@
 
 #include <zmq.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -50,6 +51,19 @@ using namespace unitree::robot;
 using unitree_hg::msg::dds_::HandCmd_;
 using unitree_hg::msg::dds_::HandState_;
 using unitree_hg::msg::dds_::MotorState_;
+
+// Latest per-hand joint angles (DEGREES), refreshed by each HandBridge's
+// state_loop and read by the tactile publisher so every fingertip frame
+// ships with the contemporaneous hand pose. NUM_JOINTS matches the Python
+// wire's JOINTS_LEN (22). Declared before TactilePublisher so publish() sees it.
+struct JointCache {
+    std::mutex mu;
+    std::array<float, NUM_JOINTS> left{};
+    std::array<float, NUM_JOINTS> right{};
+    bool left_valid  = false;
+    bool right_valid = false;
+};
+static JointCache g_joints;
 
 // ── tactile ZMQ publisher ─────────────────────────────────────────────────────
 //
@@ -90,8 +104,23 @@ public:
         const size_t f_len  = (f_blk  && f_blk->data())  ? f_blk->nbytes()  : 0;
         const size_t cp_len = (cp_blk && cp_blk->data()) ? cp_blk->nbytes() : 0;
 
+        // Snapshot the owning hand's latest joints (DEGREES). channel >=5 = left,
+        // <5 = right (matches channel_to_hand_finger). Appended as an optional
+        // fixed-size trailer so the Python wire detects it purely by length; the
+        // 28-byte header stays unchanged. j_len=0 until state_loop has a valid
+        // reading -> legacy frame, and the consumer falls back to obs joints.
+        const bool is_left = (fr->channel >= 5);
+        std::array<float, NUM_JOINTS> jbuf;
+        bool jvalid;
+        {
+            std::lock_guard<std::mutex> lk(g_joints.mu);
+            jbuf   = is_left ? g_joints.left       : g_joints.right;
+            jvalid = is_left ? g_joints.left_valid : g_joints.right_valid;
+        }
+        const size_t j_len = jvalid ? NUM_JOINTS * sizeof(float) : 0;
+
         constexpr size_t HEADER = 28;
-        std::vector<uint8_t> buf(HEADER + d_len + f_len + cp_len);
+        std::vector<uint8_t> buf(HEADER + d_len + f_len + cp_len + j_len);
         const uint32_t channel  = static_cast<uint32_t>(fr->channel);
         const uint32_t frame_id = static_cast<uint32_t>(fr->frame_id);
         const double   ts       = fr->ts;
@@ -108,7 +137,8 @@ public:
         uint8_t* body = buf.data() + HEADER;
         if (d_len)  { std::memcpy(body, d_blk->data(),  d_len);  body += d_len;  }
         if (f_len)  { std::memcpy(body, f_blk->data(),  f_len);  body += f_len;  }
-        if (cp_len) { std::memcpy(body, cp_blk->data(), cp_len); }
+        if (cp_len) { std::memcpy(body, cp_blk->data(), cp_len); body += cp_len; }
+        if (j_len)  { std::memcpy(body, jbuf.data(),    j_len); }
 
         zmq::message_t msg(buf.data(), buf.size());
         std::lock_guard<std::mutex> lk(mu_);
@@ -196,6 +226,15 @@ private:
                 for (int i = 0; i < n; ++i) states[i].q(angles_deg[i]);
                 msg.motor_state(states);
                 pub_->Write(msg);
+
+                {
+                    std::lock_guard<std::mutex> lk(g_joints.mu);
+                    auto& dst   = (side_ == "left") ? g_joints.left  : g_joints.right;
+                    bool& valid = (side_ == "left") ? g_joints.left_valid : g_joints.right_valid;
+                    const int m = std::min(static_cast<int>(angles_deg.size()), NUM_JOINTS);
+                    for (int i = 0; i < m; ++i) dst[i] = angles_deg[i];
+                    valid = (m == NUM_JOINTS);
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(state_dt_ms_));
         }

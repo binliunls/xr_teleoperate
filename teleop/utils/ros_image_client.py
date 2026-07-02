@@ -126,7 +126,12 @@ class ROSImageClient:
         queue_size: int = 2,
         warmup_timeout: float = 5.0,
         require_warmup: bool = False,
+        head_mode: str = "binocular",
     ) -> None:
+        if head_mode not in ("binocular", "mono"):
+            raise ValueError(f"head_mode must be 'binocular' or 'mono', got {head_mode!r}")
+        self._head_mode = head_mode
+
         # configure RMW before importing rclpy
         os.environ.setdefault("RMW_IMPLEMENTATION", DEFAULT_RMW)
         if cyclonedds_uri:
@@ -142,12 +147,14 @@ class ROSImageClient:
                 "Source ROS first, e.g. `source /opt/ros/jazzy/setup.bash`."
             ) from exc
 
+        # In mono mode, skip head/right entirely (no subscription, no multicast join).
         self._topics = {
             "head_left": head_left_topic,
-            "head_right": head_right_topic,
             "wrist_left": wrist_left_topic,
             "wrist_right": wrist_right_topic,
         }
+        if head_mode == "binocular":
+            self._topics["head_right"] = head_right_topic
         self._subs: dict[str, _Subscriber] = {name: _Subscriber() for name in self._topics}
 
         if not rclpy.ok():
@@ -193,11 +200,20 @@ class ROSImageClient:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             left, _ = self._subs["head_left"].snapshot()
-            right, _ = self._subs["head_right"].snapshot()
-            if left is not None and right is not None:
-                return
+            if self._head_mode == "mono":
+                if left is not None:
+                    return
+            else:
+                right, _ = self._subs["head_right"].snapshot()
+                if left is not None and right is not None:
+                    return
             time.sleep(0.05)
         if require:
+            if self._head_mode == "mono":
+                raise RuntimeError(
+                    f"Did not receive head/left within {timeout:.1f}s "
+                    f"(left={self._topics['head_left']})"
+                )
             raise RuntimeError(
                 f"Did not receive both head topics within {timeout:.1f}s "
                 f"(left={self._topics['head_left']}, right={self._topics['head_right']})"
@@ -207,13 +223,18 @@ class ROSImageClient:
 
     def get_cam_config(self) -> dict:
         """Return a config dict shaped like teleimager.cam_config_client.yaml."""
-        # Use head_left shape as the per-eye dimensions; concatenated head is 2*W wide.
+        # Use head_left shape as the per-eye dimensions; binocular doubles the width.
         hl_frame, _ = self._subs["head_left"].snapshot()
         if hl_frame is not None:
             h, w = hl_frame.shape[:2]
-            head_image_shape = [h, w * 2]  # stitched stereo width
         else:
-            head_image_shape = [480, 1280]  # placeholder; gets corrected on first frame
+            h, w = 480, 640
+        if self._head_mode == "binocular":
+            head_image_shape = [h, w * 2]  # stitched stereo width
+            head_binocular = True
+        else:  # mono
+            head_image_shape = [h, w]
+            head_binocular = False
 
         wl_frame, _ = self._subs["wrist_left"].snapshot()
         if wl_frame is not None:
@@ -226,7 +247,7 @@ class ROSImageClient:
             "head_camera": {
                 "enable_zmq": True,  # keeps existing teleop branches active
                 "enable_webrtc": False,
-                "binocular": True,  # two eyes, stitched side-by-side
+                "binocular": head_binocular,
                 "image_shape": head_image_shape,
                 "fps": 30,
                 "type": "ros",
@@ -257,6 +278,10 @@ class ROSImageClient:
 
     def get_head_frame(self) -> ROSFrame:
         left_frame, l_fps = self._subs["head_left"].snapshot()
+        if self._head_mode == "mono":
+            if left_frame is None:
+                return ROSFrame(fps=0.0, bgr_array=None)
+            return ROSFrame(fps=l_fps, bgr_array=left_frame)
         right_frame, r_fps = self._subs["head_right"].snapshot()
         if left_frame is None or right_frame is None:
             return ROSFrame(fps=0.0, bgr_array=None)

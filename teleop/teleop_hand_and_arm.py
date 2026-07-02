@@ -230,6 +230,17 @@ if __name__ == "__main__":
         "Default: zmq.",
     )
     parser.add_argument(
+        "--head-mode",
+        type=str,
+        choices=["binocular", "mono"],
+        default="binocular",
+        help="Head camera mode (ros source only). 'binocular': subscribe to both "
+        "/head/left and /head/right and stitch side-by-side (default). 'mono': use "
+        "only /head/left; recording emits color_0=head_left, color_1=wrist_left, "
+        "color_2=wrist_right. Use 'mono' when the Thor link can't carry both head "
+        "streams plus tactile (1 GbE saturation).",
+    )
+    parser.add_argument(
         "--network-interface",
         type=str,
         default=None,
@@ -340,8 +351,8 @@ if __name__ == "__main__":
         if args.camera_source == "ros":
             from teleop.utils.ros_image_client import ROSImageClient
 
-            img_client = ROSImageClient()
-            logger_mp.info("[camera] using ROS 2 image source")
+            img_client = ROSImageClient(head_mode=args.head_mode)
+            logger_mp.info(f"[camera] using ROS 2 image source (head_mode={args.head_mode})")
         else:
             img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
             logger_mp.info(f"[camera] using ZMQ image source ({args.img_server_ip})")

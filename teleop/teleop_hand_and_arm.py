@@ -9,6 +9,8 @@ logger_mp = logging_mp.getLogger(__name__)
 
 import os
 import sys
+import numpy as np
+import pinocchio as pin
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
@@ -53,6 +55,12 @@ STOP = False  # Enable to begin system exit procedure
 READY = False  # Ready to (1) enter START state, (2) enter RECORD_RUNNING state
 RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE = False  # Toggle recording state
+CALIBRATE = False
+CALIBRATED = False
+REF_LEFT_WRIST_POSE = None
+REF_RIGHT_WRIST_POSE = None
+INIT_LEFT_TARGET_POSE = None
+INIT_RIGHT_TARGET_POSE = None
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
 #  -------        ---------      |         -----------      |         -----------      |     ---------
@@ -67,9 +75,11 @@ RECORD_TOGGLE = False  # Toggle recording state
 
 
 def on_press(key):
-    global STOP, START, RECORD_TOGGLE
+    global STOP, START, RECORD_TOGGLE, CALIBRATE
     if key == "r":
         START = True
+    elif key == "c":
+        CALIBRATE = True
     elif key == "q":
         START = False
         STOP = True
@@ -77,6 +87,72 @@ def on_press(key):
         RECORD_TOGGLE = True
     else:
         logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
+
+
+def _compute_relative_target_pose(current_pose, ref_pose, init_pose):
+    current_pose = np.asarray(current_pose)
+    ref_pose = np.asarray(ref_pose)
+    init_pose = np.asarray(init_pose)
+
+    delta_pos = current_pose[:3, 3] - ref_pose[:3, 3]
+    rel_rot = current_pose[:3, :3] @ ref_pose[:3, :3].T
+
+    target = np.eye(4, dtype=current_pose.dtype)
+    target[:3, 3] = init_pose[:3, 3] + delta_pos
+    target[:3, :3] = rel_rot @ init_pose[:3, :3]
+    return target
+
+
+def _get_ik_translation_scale(arm_ik) -> float:
+    human_arm_length = getattr(arm_ik, "human_arm_length", None)
+    robot_arm_length = getattr(arm_ik, "robot_arm_length", None)
+    if human_arm_length is not None and robot_arm_length is not None:
+        human_arm_length = float(human_arm_length)
+        robot_arm_length = float(robot_arm_length)
+        if human_arm_length > 0:
+            return robot_arm_length / human_arm_length
+
+    if isinstance(arm_ik, (H1_2_ArmIK, H1_ArmIK)):
+        return 0.75 / 0.60
+
+    return 1.0
+
+
+def _try_calibrate_from_teleop(tele_data, arm_ctrl, arm_ik) -> bool:
+    global CALIBRATED, REF_LEFT_WRIST_POSE, REF_RIGHT_WRIST_POSE, INIT_LEFT_TARGET_POSE, INIT_RIGHT_TARGET_POSE
+
+    left_wrist_pose = getattr(tele_data, "left_wrist_pose", None)
+    right_wrist_pose = getattr(tele_data, "right_wrist_pose", None)
+    if left_wrist_pose is None or right_wrist_pose is None:
+        return False
+
+    left_wrist_pose = np.asarray(left_wrist_pose)
+    right_wrist_pose = np.asarray(right_wrist_pose)
+    if left_wrist_pose.shape != (4, 4) or right_wrist_pose.shape != (4, 4):
+        return False
+
+    if not hasattr(arm_ik, "reduced_robot") or not hasattr(arm_ik, "L_hand_id") or not hasattr(arm_ik, "R_hand_id"):
+        return False
+
+    current_lr_arm_q = arm_ctrl.get_current_dual_arm_q()
+    pin.forwardKinematics(arm_ik.reduced_robot.model, arm_ik.reduced_robot.data, current_lr_arm_q)
+    pin.updateFramePlacements(arm_ik.reduced_robot.model, arm_ik.reduced_robot.data)
+
+    left_ee_se3 = arm_ik.reduced_robot.data.oMf[arm_ik.L_hand_id]
+    right_ee_se3 = arm_ik.reduced_robot.data.oMf[arm_ik.R_hand_id]
+
+    translation_scale = _get_ik_translation_scale(arm_ik)
+    if translation_scale <= 0:
+        return False
+
+    REF_LEFT_WRIST_POSE = left_wrist_pose.copy()
+    REF_RIGHT_WRIST_POSE = right_wrist_pose.copy()
+    INIT_LEFT_TARGET_POSE = left_ee_se3.homogeneous.copy()
+    INIT_RIGHT_TARGET_POSE = right_ee_se3.homogeneous.copy()
+    INIT_LEFT_TARGET_POSE[:3, 3] /= translation_scale
+    INIT_RIGHT_TARGET_POSE[:3, 3] /= translation_scale
+    CALIBRATED = True
+    return True
 
 
 def get_state() -> dict:
@@ -118,6 +194,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ee",
         type=str,
+        default="sharpa",
         choices=["dex1", "dex3", "inspire_ftp", "inspire_dfx", "brainco", "sharpa"],
         help="Select end effector controller",
     )
@@ -125,7 +202,8 @@ if __name__ == "__main__":
         "--sharpa-dds-domain",
         type=int,
         default=0,
-        help="DDS domain ID for Sharpa hand state (must match retargeting script -dds_domain, default: 0).",
+        help="DDS domain ID for Sharpa hand state — must match the publisher "
+        "(bridge on Thor or retargeting daemon). Default: 0.",
     )
     parser.add_argument(
         "--img-server-ip",
@@ -134,13 +212,37 @@ if __name__ == "__main__":
         help="IP address of image server, used by teleimager and televuer",
     )
     parser.add_argument(
+        "--camera-source",
+        type=str,
+        choices=["zmq", "ros"],
+        default="ros",
+        help="Camera source: 'zmq' (teleimager image server) or 'ros' "
+        "(rclpy subscriber on /head/{left,right}/image_raw and /wrist/{left,right}/image_raw). "
+        "Default: zmq.",
+    )
+    parser.add_argument(
         "--network-interface",
         type=str,
         default=None,
         help="Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.",
     )
+    parser.add_argument(
+        "--human-arm-length",
+        type=float,
+        default=0.60,
+        metavar="M",
+        help="Human arm length used for wrist pose scaling in IK (meters).",
+    )
     # mode flags
     parser.add_argument("--motion", action="store_true", help="Enable motion control mode")
+    parser.add_argument(
+        "--head-pitch-home",
+        type=float,
+        default=0.6,
+        metavar="RAD",
+        help="H2 head pitch at home/rest position in radians (default: 0.3, looking slightly down). "
+        "Range: -0.523 (up) to 0.837 (down).",
+    )
     parser.add_argument("--headless", action="store_true", help="Enable headless mode (no display)")
     parser.add_argument("--sim", action="store_true", help="Enable isaac simulation mode")
     parser.add_argument(
@@ -155,29 +257,46 @@ if __name__ == "__main__":
     )
     # record mode and task info
     parser.add_argument("--record", action="store_true", help="Enable data recording mode")
+    # H2 only: include the 3 waist joints (yaw, roll, pitch) in body state/action.
+    # On by default — pass --no-record-waist to suppress. Waist is read-only on the
+    # current hardware; the recorded "action" mirrors state (same pattern as sharpa ee).
+    _waist_group = parser.add_mutually_exclusive_group()
+    _waist_group.add_argument(
+        "--record-waist",
+        dest="record_waist",
+        action="store_true",
+        default=True,
+        help="H2 only: record waist (yaw/roll/pitch) under body.qpos for state and action. Default: on.",
+    )
+    _waist_group.add_argument(
+        "--no-record-waist",
+        dest="record_waist",
+        action="store_false",
+        help="Disable waist recording for H2.",
+    )
     parser.add_argument("--task-dir", type=str, default="./utils/data/", help="path to save data")
     parser.add_argument(
         "--task-name",
         type=str,
-        default="pick_apple",
+        default="assemble_trocar",
         help="task file name for recording",
     )
     parser.add_argument(
         "--task-goal",
         type=str,
-        default="pick_up_apple_and_place_in_tray.",
+        default="assemble_trocar.",
         help="task goal for recording at json file",
     )
     parser.add_argument(
         "--task-desc",
         type=str,
-        default="pick_up_apple_and_place_in_tray.",
+        default="assemble_the_trocar_and_place_it_on_the_table.",
         help="task description for recording at json file",
     )
     parser.add_argument(
         "--task-steps",
         type=str,
-        default="step1: pickup apple; step2: change hand; step3: place apple in tray;",
+        default="step1: pick left part, step2: pick right part, step3: assemble the trocar, step4: place the trocar on the table.",
         help="task steps for recording at json file",
     )
 
@@ -208,8 +327,15 @@ if __name__ == "__main__":
             )
             listen_keyboard_thread.start()
 
-        # image client
-        img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
+        # image client — pick ZMQ (teleimager) or ROS 2 source
+        if args.camera_source == "ros":
+            from teleop.utils.ros_image_client import ROSImageClient
+
+            img_client = ROSImageClient()
+            logger_mp.info("[camera] using ROS 2 image source")
+        else:
+            img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
+            logger_mp.info(f"[camera] using ZMQ image source ({args.img_server_ip})")
         camera_config = img_client.get_cam_config()
         logger_mp.debug(f"Camera config: {camera_config}")
         # H2 uses pass-through display so never needs to push images to the XR headset,
@@ -256,7 +382,9 @@ if __name__ == "__main__":
             arm_ctrl = H1_ArmController(simulation_mode=args.sim)
         elif args.arm == "H2":
             arm_ik = H2_ArmIK()
-            arm_ctrl = H2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+            arm_ctrl = H2_ArmController(
+                motion_mode=args.motion, simulation_mode=args.sim, head_pitch_home=args.head_pitch_home
+            )
 
         # end-effector
         if args.ee == "dex3":
@@ -426,13 +554,18 @@ if __name__ == "__main__":
                     "left_pinky_DIP",
                 ]
                 _sharpa_right_joint_names = [n.replace("left_", "right_") for n in _sharpa_left_joint_names]
+                _body_joint_names = None
+                if args.arm == "H2" and args.record_waist:
+                    _body_joint_names = list(H2_ArmController.H2_WAIST_JOINT_NAMES)
                 recorder.set_ee_metadata(
                     left_joint_names=_sharpa_left_joint_names,
                     right_joint_names=_sharpa_right_joint_names,
+                    body_joint_names=_body_joint_names,
                 )
 
         logger_mp.info("----------------------------------------------------------------")
-        logger_mp.info("🟢  Press [r] on keyboard or [B button] on right controller to start syncing.")
+        logger_mp.info("�  Press [c] on keyboard to calibrate (recommended before starting).")
+        logger_mp.info("�  Press [r] on keyboard or [B button] on right controller to start syncing.")
         if args.record:
             logger_mp.info(
                 "🟡  Press [s] on keyboard or [Y button] on right controller to START or SAVE recording (toggle cycle)."
@@ -442,10 +575,10 @@ if __name__ == "__main__":
         logger_mp.info("🔴  Press [q] on keyboard or [A button] on right controller to stop and exit.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True  # now ready to (1) enter START state
-        while not START and not STOP:  # wait for start or stop signal.
+        while not STOP:
             time.sleep(0.033)
 
-            # Allow using VR controller to start/stop
+            tele_data = None
             if args.input_mode == "controller":
                 tele_data = tv_wrapper.get_tele_data()
                 if tele_data.right_ctrl_bButton:
@@ -453,6 +586,31 @@ if __name__ == "__main__":
                 elif tele_data.right_ctrl_aButton:
                     START = False
                     STOP = True
+
+            if STOP:
+                break
+
+            if CALIBRATE:
+                if tele_data is None:
+                    tele_data = tv_wrapper.get_tele_data()
+                if _try_calibrate_from_teleop(tele_data, arm_ctrl, arm_ik):
+                    logger_mp.info("Calibration complete.")
+                else:
+                    logger_mp.warning("Calibration failed (missing wrist pose or robot model state).")
+                CALIBRATE = False
+
+            if START and not CALIBRATED:
+                if tele_data is None:
+                    tele_data = tv_wrapper.get_tele_data()
+                if _try_calibrate_from_teleop(tele_data, arm_ctrl, arm_ik):
+                    logger_mp.info("Calibration complete. Starting tracking.")
+                else:
+                    logger_mp.warning("Calibration failed. Tracking not started.")
+                    START = False
+                    continue
+
+            if START and CALIBRATED:
+                break
 
             if args.arm != "H2" and camera_config["head_camera"]["enable_zmq"] and xr_need_local_img:
                 head_img = img_client.get_head_frame()
@@ -545,15 +703,36 @@ if __name__ == "__main__":
                         -tele_data.right_ctrl_thumbstickValue[0] * 0.3,
                     )
 
+            if CALIBRATE:
+                if _try_calibrate_from_teleop(tele_data, arm_ctrl, arm_ik):
+                    logger_mp.info("Calibration complete.")
+                else:
+                    logger_mp.warning("Calibration failed (missing wrist pose or robot model state).")
+                CALIBRATE = False
+
+            if not CALIBRATED:
+                continue
+
             # get current robot state data.
             current_lr_arm_q = arm_ctrl.get_current_dual_arm_q()
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
 
+            left_target_pose = _compute_relative_target_pose(
+                tele_data.left_wrist_pose,
+                REF_LEFT_WRIST_POSE,
+                INIT_LEFT_TARGET_POSE,
+            )
+            right_target_pose = _compute_relative_target_pose(
+                tele_data.right_wrist_pose,
+                REF_RIGHT_WRIST_POSE,
+                INIT_RIGHT_TARGET_POSE,
+            )
+
             # solve ik using motor data and wrist pose, then use ik results to control arms.
             time_ik_start = time.time()
             sol_q, sol_tauff = arm_ik.solve_ik(
-                tele_data.left_wrist_pose,
-                tele_data.right_wrist_pose,
+                left_target_pose,
+                right_target_pose,
                 current_lr_arm_q,
                 current_lr_arm_dq,
             )
@@ -609,7 +788,9 @@ if __name__ == "__main__":
                         curr_right_ee = list(dual_hand_state_array[-SHARPA_DOF:])
                     if all(v == 0.0 for v in curr_left_ee) and all(v == 0.0 for v in curr_right_ee):
                         logger_mp.warning(
-                            "[SharpaWave] hand data is ALL ZEROS — retargeting script may not be running or DDS topic not received"
+                            "[SharpaWave] hand state is ALL ZEROS — check that the bridge "
+                            "(or retargeting -sdk -dds) is publishing rt/sharpa/{left,right}/state "
+                            "on the same DDS domain"
                         )
                     # action[t] = state[t+1]: recorded action is the next step's observed state
                     left_ee_state = _sharpa_ee_prev[0] if _sharpa_ee_prev is not None else curr_left_ee
@@ -626,6 +807,11 @@ if __name__ == "__main__":
                     right_hand_action = []
                     current_body_state = []
                     current_body_action = []
+
+                # H2 waist (yaw, roll, pitch) — recorded under body.qpos for state only.
+                # Hardware is read-only for waist (no SDK control), so action stays empty.
+                if args.arm == "H2" and args.record_waist:
+                    current_body_state = arm_ctrl.get_current_waist_q().tolist()
 
                 # arm state and action
                 left_arm_state = current_lr_arm_q[:7]

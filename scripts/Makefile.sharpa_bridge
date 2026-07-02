@@ -1,0 +1,96 @@
+# Build sharpa_dds_bridge on Thor (aarch64 native).
+#
+# Required env vars (or set below):
+#   UNITREE_SDK2_DIR   — path to the unitree_sdk2 directory that contains
+#                        include/, lib/aarch64/, and thirdparty/
+#   SHARPA_INCLUDE_DIR — Sharpa SDK C++ headers (default: /usr/include/sharpa-wave-sdk)
+#   SHARPA_LIB_DIR     — Sharpa SDK library dir   (default: /usr/lib/sharpa-wave-sdk)
+#
+# Example:
+#   make -f Makefile.sharpa_bridge UNITREE_SDK2_DIR=~/unitree_sdk2
+
+CXX      := g++
+CXXFLAGS := -std=c++17 -O2 -Wall
+
+# ── Sharpa SDK paths ──────────────────────────────────────────────────────────
+SHARPA_SDK_PATH    ?= /usr/lib/sharpa-wave-sdk
+SHARPA_INCLUDE_DIR ?= /usr/include/sharpa-wave-sdk
+SHARPA_LIB_DIR     ?= $(SHARPA_SDK_PATH)
+
+# ── Unitree SDK2 paths ────────────────────────────────────────────────────────
+# Set UNITREE_SDK2_DIR to the directory containing include/ and lib/aarch64/.
+# Common locations (checked in order):
+UNITREE_SDK2_SEARCH := \
+    $(HOME)/unitree_repo/unitree_sdk2 \
+    $(HOME)/unitree_sdk2 \
+    /opt/unitree_sdk2 \
+    $(HOME)/binliu/unitree_sdk2
+
+ifndef UNITREE_SDK2_DIR
+UNITREE_SDK2_DIR := $(firstword $(foreach d,$(UNITREE_SDK2_SEARCH),$(wildcard $(d))))
+endif
+
+ifeq ($(UNITREE_SDK2_DIR),)
+$(error UNITREE_SDK2_DIR not set and not found in $(UNITREE_SDK2_SEARCH). \
+  Clone https://github.com/unitreerobotics/unitree_sdk2 and set UNITREE_SDK2_DIR=<path>)
+endif
+
+ARCH ?= $(shell uname -m)
+
+# Two common layouts:
+#   1. SDK source tree:    include/, thirdparty/include/, lib/<arch>/, thirdparty/lib/<arch>/
+#   2. Installed package:  include/, include/ddscxx/, lib/, lib/   (flat, no arch subdir)
+# Auto-detect by checking whether thirdparty/ exists; user can override any of these.
+ifneq ($(wildcard $(UNITREE_SDK2_DIR)/thirdparty/.),)
+  # Source-tree layout. The C++ headers live under thirdparty/include/ddscxx/
+  # (dds/dds.hpp etc.) and the C headers live alongside at thirdparty/include/
+  # (dds/dds.h etc.). Both must be on the include path.
+  UNITREE_INC_DIR        ?= $(UNITREE_SDK2_DIR)/include
+  UNITREE_THIRD_INC      ?= $(UNITREE_SDK2_DIR)/thirdparty/include
+  UNITREE_THIRD_INC_CXX  ?= $(UNITREE_SDK2_DIR)/thirdparty/include/ddscxx
+  UNITREE_LIB_DIR        ?= $(UNITREE_SDK2_DIR)/lib/$(ARCH)
+  UNITREE_THIRD_DIR      ?= $(UNITREE_SDK2_DIR)/thirdparty/lib/$(ARCH)
+else
+  # Installed-package layout (e.g. /opt/unitree_robotics). C++ headers under
+  # include/ddscxx/, C headers under include/ (same dir as the main SDK).
+  UNITREE_INC_DIR        ?= $(UNITREE_SDK2_DIR)/include
+  UNITREE_THIRD_INC      ?= $(UNITREE_SDK2_DIR)/include
+  UNITREE_THIRD_INC_CXX  ?= $(UNITREE_SDK2_DIR)/include/ddscxx
+  UNITREE_LIB_DIR        ?= $(UNITREE_SDK2_DIR)/lib
+  UNITREE_THIRD_DIR      ?= $(UNITREE_SDK2_DIR)/lib
+endif
+
+INCLUDES := \
+    -I$(UNITREE_INC_DIR) \
+    -I$(UNITREE_THIRD_INC) \
+    -I$(UNITREE_THIRD_INC_CXX) \
+    -I$(SHARPA_INCLUDE_DIR)
+
+LDFLAGS := \
+    -L$(UNITREE_LIB_DIR)   -lunitree_sdk2 \
+    -L$(UNITREE_THIRD_DIR) -lddsc -lddscxx \
+    -L$(SHARPA_LIB_DIR)    -lsharpa-wave-sdk \
+    -Wl,-rpath,$(UNITREE_THIRD_DIR) \
+    -Wl,-rpath,$(SHARPA_LIB_DIR) \
+    -lpthread
+
+TARGET := sharpa_dds_bridge
+SRC    := sharpa_dds_bridge.cpp
+
+.PHONY: all clean info
+
+all: $(TARGET)
+
+$(TARGET): $(SRC)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< -o $@ $(LDFLAGS)
+	@echo "Built: $(TARGET)"
+
+clean:
+	rm -f $(TARGET)
+
+info:
+	@echo "ARCH             = $(ARCH)"
+	@echo "UNITREE_SDK2_DIR = $(UNITREE_SDK2_DIR)"
+	@echo "UNITREE_LIB_DIR  = $(UNITREE_LIB_DIR)"
+	@echo "SHARPA_INCLUDE   = $(SHARPA_INCLUDE_DIR)"
+	@echo "SHARPA_LIB       = $(SHARPA_LIB_DIR)"

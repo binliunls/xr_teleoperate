@@ -192,6 +192,15 @@ if __name__ == "__main__":
         help="Select arm controller",
     )
     parser.add_argument(
+        "--arm-side",
+        type=str,
+        choices=["left", "right", "both"],
+        default="both",
+        help="Which arm(s) to teleoperate. The disabled arm is pinned at its "
+        "calibration initial pose so it stays mechanically static (useful for "
+        "single-arm data collection). Default: both arms active.",
+    )
+    parser.add_argument(
         "--ee",
         type=str,
         default="sharpa",
@@ -219,6 +228,17 @@ if __name__ == "__main__":
         help="Camera source: 'zmq' (teleimager image server) or 'ros' "
         "(rclpy subscriber on /head/{left,right}/image_raw and /wrist/{left,right}/image_raw). "
         "Default: zmq.",
+    )
+    parser.add_argument(
+        "--head-mode",
+        type=str,
+        choices=["binocular", "mono"],
+        default="binocular",
+        help="Head camera mode (ros source only). 'binocular': subscribe to both "
+        "/head/left and /head/right and stitch side-by-side (default). 'mono': use "
+        "only /head/left; recording emits color_0=head_left, color_1=wrist_left, "
+        "color_2=wrist_right. Use 'mono' when the Thor link can't carry both head "
+        "streams plus tactile (1 GbE saturation).",
     )
     parser.add_argument(
         "--network-interface",
@@ -331,8 +351,8 @@ if __name__ == "__main__":
         if args.camera_source == "ros":
             from teleop.utils.ros_image_client import ROSImageClient
 
-            img_client = ROSImageClient()
-            logger_mp.info("[camera] using ROS 2 image source")
+            img_client = ROSImageClient(head_mode=args.head_mode)
+            logger_mp.info(f"[camera] using ROS 2 image source (head_mode={args.head_mode})")
         else:
             img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
             logger_mp.info(f"[camera] using ZMQ image source ({args.img_server_ip})")
@@ -717,16 +737,26 @@ if __name__ == "__main__":
             current_lr_arm_q = arm_ctrl.get_current_dual_arm_q()
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
 
-            left_target_pose = _compute_relative_target_pose(
-                tele_data.left_wrist_pose,
-                REF_LEFT_WRIST_POSE,
-                INIT_LEFT_TARGET_POSE,
-            )
-            right_target_pose = _compute_relative_target_pose(
-                tele_data.right_wrist_pose,
-                REF_RIGHT_WRIST_POSE,
-                INIT_RIGHT_TARGET_POSE,
-            )
+            # --arm-side semantics: the disabled arm keeps targeting its calibrated
+            # init pose every tick, so the IK solver resolves it to a constant joint
+            # configuration. Mechanically the arm holds still; the recording captures
+            # constant values for the disabled side instead of operator drift.
+            if args.arm_side in ("left", "both"):
+                left_target_pose = _compute_relative_target_pose(
+                    tele_data.left_wrist_pose,
+                    REF_LEFT_WRIST_POSE,
+                    INIT_LEFT_TARGET_POSE,
+                )
+            else:
+                left_target_pose = INIT_LEFT_TARGET_POSE
+            if args.arm_side in ("right", "both"):
+                right_target_pose = _compute_relative_target_pose(
+                    tele_data.right_wrist_pose,
+                    REF_RIGHT_WRIST_POSE,
+                    INIT_RIGHT_TARGET_POSE,
+                )
+            else:
+                right_target_pose = INIT_RIGHT_TARGET_POSE
 
             # solve ik using motor data and wrist pose, then use ik results to control arms.
             time_ik_start = time.time()

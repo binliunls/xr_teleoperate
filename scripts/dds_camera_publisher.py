@@ -22,6 +22,7 @@ from cyclonedds.idl import IdlStruct
 from cyclonedds.idl.types import sequence, uint8, uint32, uint64
 from cyclonedds.pub import DataWriter, Publisher
 from cyclonedds.topic import Topic
+from cyclonedds.util import duration
 
 try:
     import gi
@@ -219,6 +220,31 @@ def publish_camera(
             report_at = now + 5.0
 
 
+def cyclonedds_config(network_interface: str | None) -> str:
+    """DDSI-level fragmentation keeps JPEG samples below the 1500 B Ethernet MTU.
+
+    Without it a single frame becomes one ~13 kB datagram whose IP fragments the
+    kernel must reassemble, and one lost fragment costs the whole frame.
+    """
+    interfaces = ""
+    if network_interface:
+        name = escape(network_interface, {'"': "&quot;"})
+        interfaces = f'<Interfaces><NetworkInterface name="{name}"/></Interfaces>'
+    return (
+        "<CycloneDDS><Domain><General>"
+        f"{interfaces}"
+        "<MaxMessageSize>1400B</MaxMessageSize>"
+        "<FragmentSize>1200B</FragmentSize>"
+        "</General><Internal>"
+        # The reader learns about a missing fragment from a heartbeat, so the
+        # 100 ms default makes retransmit requests arrive long after a 30 fps
+        # sample has been overwritten, capping delivery at ~10 fps.
+        '<HeartbeatInterval min="5ms" minsched="5ms" max="20ms">10ms</HeartbeatInterval>'
+        "<NackDelay>5ms</NackDelay>"
+        "</Internal></Domain></CycloneDDS>"
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--domain", type=int, default=10)
@@ -239,16 +265,18 @@ def main() -> int:
     if not 1 <= args.jpeg_quality <= 100:
         raise SystemExit("--jpeg-quality must be in [1, 100]")
 
-    if args.network_interface and "CYCLONEDDS_URI" not in os.environ:
-        interface = escape(args.network_interface, {'"': "&quot;"})
-        os.environ["CYCLONEDDS_URI"] = (
-            "<CycloneDDS><Domain><General><Interfaces>"
-            f'<NetworkInterface name="{interface}"/>'
-            "</Interfaces></General></Domain></CycloneDDS>"
-        )
+    if "CYCLONEDDS_URI" not in os.environ:
+        os.environ["CYCLONEDDS_URI"] = cyclonedds_config(args.network_interface)
     participant = DomainParticipant(args.domain)
     publisher = Publisher(participant)
-    qos = Qos(Policy.Reliability.BestEffort, Policy.History.KeepLast(1))
+    # Reliable so lost fragments are retransmitted instead of dropping the whole
+    # JPEG sample; KeepLast(1) keeps the writer from blocking on a slow reader.
+    # Depth must cover the retransmit round trip: at 30 fps a KeepLast(1) history
+    # is overwritten after 33 ms, before any NACK for it can arrive.
+    qos = Qos(
+        Policy.Reliability.Reliable(duration(milliseconds=100)),
+        Policy.History.KeepLast(10),
+    )
     writers = {
         name: DataWriter(
             publisher,

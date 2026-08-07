@@ -20,6 +20,7 @@ from cyclonedds.idl import IdlStruct
 from cyclonedds.idl.types import sequence, uint8, uint32, uint64
 from cyclonedds.sub import DataReader, Subscriber
 from cyclonedds.topic import Topic
+from cyclonedds.util import duration
 
 
 @dataclass
@@ -94,6 +95,34 @@ class _LatestFrame:
             )
 
 
+def _cyclonedds_config(network_interface: Optional[str]) -> str:
+    """DDSI-level fragmentation keeps JPEG samples below the 1500 B Ethernet MTU.
+
+    Without it a single frame becomes one ~13 kB datagram whose IP fragments the
+    kernel must reassemble, and one lost fragment costs the whole frame.
+    """
+    interfaces = ""
+    if network_interface:
+        name = escape(network_interface, {'"': "&quot;"})
+        interfaces = f'<Interfaces><NetworkInterface name="{name}"/></Interfaces>'
+    return (
+        "<CycloneDDS><Domain><General>"
+        f"{interfaces}"
+        "<MaxMessageSize>1400B</MaxMessageSize>"
+        "<FragmentSize>1200B</FragmentSize>"
+        "</General><Internal>"
+        '<SocketReceiveBufferSize min="4MiB" max="16MiB"/>'
+        # A 30 fps sample is overwritten in the writer history after 33 ms, so
+        # the 100 ms default NackDelay asks for retransmits of frames that no
+        # longer exist and caps delivery at ~10 fps.
+        "<NackDelay>5ms</NackDelay>"
+        # Reliable readers use the reliable defrag pool; four streams of ~25
+        # fragments each overrun the default of 16.
+        "<DefragReliableMaxSamples>64</DefragReliableMaxSamples>"
+        "</Internal></Domain></CycloneDDS>"
+    )
+
+
 class DDSImageClient:
     """Latest-frame DDS camera client with the teleimager API."""
 
@@ -110,16 +139,17 @@ class DDSImageClient:
         self._latest = {name: _LatestFrame() for name in self.topics}
         self._stop = threading.Event()
 
-        if network_interface and "CYCLONEDDS_URI" not in os.environ:
-            interface = escape(network_interface, {'"': "&quot;"})
-            os.environ["CYCLONEDDS_URI"] = (
-                "<CycloneDDS><Domain><General><Interfaces>"
-                f'<NetworkInterface name="{interface}"/>'
-                "</Interfaces></General></Domain></CycloneDDS>"
-            )
+        if "CYCLONEDDS_URI" not in os.environ:
+            os.environ["CYCLONEDDS_URI"] = _cyclonedds_config(network_interface)
         self._participant = DomainParticipant(domain_id)
         self._subscriber = Subscriber(self._participant)
-        qos = Qos(Policy.Reliability.BestEffort, Policy.History.KeepLast(1))
+        # Reliable so CycloneDDS retransmits individual lost fragments; a JPEG
+        # frame spans ~11 fragments and best-effort drops the whole sample when
+        # any one of them is lost.
+        qos = Qos(
+            Policy.Reliability.Reliable(duration(milliseconds=100)),
+            Policy.History.KeepLast(4),
+        )
         self._readers: dict[str, DataReader] = {}
         for name, topic_name in self.topics.items():
             topic = Topic(self._participant, topic_name, CameraFrame, qos=qos)

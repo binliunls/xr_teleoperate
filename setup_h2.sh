@@ -286,11 +286,24 @@ manus_install() {
     info "MANUS SDK/client installed; insert the Sensor Dongle and an SDK(integrated)-enabled License Key, then run manus-start"
 }
 
+# Only report processes whose executable really is the client binary; matching the
+# command line alone also hits editors, shells, and wrappers that mention the path.
+manus_client_running() {
+    local target pid exe
+    target="$(readlink -f "$MANUS_CLIENT_DIR/SharpaManusClient.out" 2>/dev/null)" || return 1
+    [[ -n "$target" ]] || return 1
+    for pid in $(pgrep -f 'SharpaManusClient\.out' 2>/dev/null || true); do
+        exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+        [[ "$exe" == "$target" ]] && return 0
+    done
+    return 1
+}
+
 manus_start() {
     local client="$MANUS_CLIENT_DIR/SharpaManusClient.out"
     need_file "$client"
     [[ -x "$client" ]] || die "MANUS client is not executable; run manus-install first"
-    if pgrep -f '[S]harpaManusClient.out' >/dev/null 2>&1; then
+    if manus_client_running; then
         die "SharpaManusClient.out is already running; do not start another instance"
     fi
     cat >&2 <<EOF
@@ -312,7 +325,7 @@ manus_check() {
         ldd "$client" >&2
         die "The MANUS client has missing shared-library dependencies"
     fi
-    pgrep -f '[S]harpaManusClient.out' >/dev/null 2>&1 ||
+    manus_client_running ||
         die "SharpaManusClient.out is not running; run manus-start in a separate terminal"
     ss -ltn | awk '$4 ~ /:2044$/ {found=1} END {exit !found}' ||
         die "The MANUS client is running but is not listening on TCP port 2044"

@@ -41,6 +41,8 @@
 The workstation-side H2 teleop, timestamp, and episode integration is
 documented in
 [`teleop/docs/sharpa_native_180_capture.md`](teleop/docs/sharpa_native_180_capture.md).
+For a clean-machine setup checklist, see
+[`teleop/docs/h2_sharpa_workstation_reproduction.md`](teleop/docs/h2_sharpa_workstation_reproduction.md).
 For that deployment, this repository is the source of truth for workstation
 code; the paired `sharpa-teleop` repository is the source of truth for the
 Thor DDS bridge and native tactile recorder. Keep the corresponding commits

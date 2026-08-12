@@ -164,7 +164,18 @@ class EpisodeWriter:
         logger_mp.info(f"==> New episode created: {self.episode_dir}")
         return True  # Return True if the episode is successfully created
 
-    def add_item(self, colors, depths=None, states=None, actions=None, tactiles=None, audios=None, sim_state=None):
+    def add_item(
+        self,
+        colors,
+        depths=None,
+        states=None,
+        actions=None,
+        tactiles=None,
+        audios=None,
+        sim_state=None,
+        timestamps=None,
+        native_capture=None,
+    ):
         # Increment the item ID
         self.item_id += 1
         # Create the item data dictionary
@@ -178,8 +189,18 @@ class EpisodeWriter:
             "audios": audios,
             "sim_state": sim_state,
         }
+        # Additive fields: older callers that do not provide them retain the
+        # exact legacy item schema.  The native marker repeats idx so it can be
+        # joined directly with the Thor-side SAMPLE record.
+        if timestamps is not None:
+            item_data["timestamps"] = dict(timestamps)
+        if native_capture is not None:
+            capture_marker = dict(native_capture)
+            capture_marker["idx"] = self.item_id
+            item_data["native_capture"] = capture_marker
         # Enqueue the item data
         self.item_data_queue.put(item_data)
+        return self.item_id
 
     def process_queue(self):
         while not self.stop_worker or not self.item_data_queue.empty():

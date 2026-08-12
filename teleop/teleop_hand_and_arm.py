@@ -36,6 +36,26 @@ from teleimager.image_client import ImageClient
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
+from teleop.utils.discover_h2_dds_peer import (
+    DEFAULT_THOR_SSH_TARGET,
+    H2PeerDiscoveryError,
+    discover_h2_body_peers_via_ssh,
+)
+from teleop.utils.unitree_dds_network import (
+    H2_BODY_DDS_ADDRESSES,
+    THOR_DDS_ADDRESS,
+    WORKSTATION_DDS_ADDRESS,
+    WORKSTATION_ROBOT_DDS_ADDRESS,
+    build_address_config,
+)
+from teleop.utils.sharpa_native_capture import (
+    DEFAULT_CONTROL_ADDRESS as SHARPA_CAPTURE_DEFAULT_ADDRESS,
+    PROTOCOL as SHARPA_CAPTURE_PROTOCOL,
+    CaptureControlError,
+    SharpaNativeCaptureClient,
+    resolve_tactile_host,
+    write_capture_metadata,
+)
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -166,6 +186,39 @@ def get_state() -> dict:
     }
 
 
+def _frame_camera_timestamps(frame, fallback_name: str) -> dict:
+    """Extract real source/receive timestamps without inventing unavailable ones."""
+    if frame is None:
+        return {}
+    camera_timestamps = getattr(frame, "camera_timestamps", None)
+    if isinstance(camera_timestamps, dict) and camera_timestamps:
+        return {
+            str(name): {key: value for key, value in values.items() if value is not None}
+            for name, values in camera_timestamps.items()
+            if isinstance(values, dict) and any(value is not None for value in values.values())
+        }
+
+    receive_monotonic_ns = getattr(frame, "workstation_receive_monotonic_ns", None)
+    receive_realtime_ns = getattr(frame, "workstation_receive_realtime_ns", None)
+    if receive_monotonic_ns is None and receive_realtime_ns is None:
+        return {}
+    timestamps = {}
+    if receive_monotonic_ns is not None:
+        timestamps["workstation_receive_monotonic_ns"] = int(receive_monotonic_ns)
+    if receive_realtime_ns is not None:
+        timestamps["workstation_receive_realtime_ns"] = int(receive_realtime_ns)
+    return {fallback_name: timestamps}
+
+
+def _episode_capture_metadata(metadata: dict, episode_dir: str, task_name: str) -> dict:
+    result = dict(metadata)
+    result["workstation_episode"] = {
+        "task_name": task_name,
+        "episode_dir": os.path.basename(episode_dir),
+    }
+    return result
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # basic control parameters
@@ -217,15 +270,39 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sharpa-tactile-host",
         type=str,
-        default="127.0.0.1",
-        help="Hostname/IP of the Sharpa tactile ZMQ publisher (the bridge on Thor, "
-        "or 127.0.0.1 when running sharpa_tactile_sim.py locally).",
+        default=THOR_DDS_ADDRESS,
+        help="Sharpa 30 Hz compatibility tactile host "
+        f"(default: {THOR_DDS_ADDRESS}).",
     )
     parser.add_argument(
         "--sharpa-tactile-port",
         type=int,
         default=7779,
         help="Sharpa tactile ZMQ port — must match the bridge's --tactile-port.",
+    )
+    parser.add_argument(
+        "--sharpa-native-capture",
+        nargs="?",
+        const=SHARPA_CAPTURE_DEFAULT_ADDRESS,
+        default=None,
+        metavar="CONTROL_ADDRESS",
+        help="Enable Thor-local native-rate Sharpa capture. With no address, uses "
+        f"{SHARPA_CAPTURE_DEFAULT_ADDRESS}. Only low-bandwidth START/SAMPLE/STOP "
+        "markers cross the workstation link; 180 Hz tactile stays on Thor.",
+    )
+    parser.add_argument(
+        "--sharpa-native-capture-timeout",
+        type=float,
+        default=0.35,
+        metavar="SECONDS",
+        help="Maximum START/SAMPLE control reply time (default: 0.35 s).",
+    )
+    parser.add_argument(
+        "--sharpa-native-capture-stop-timeout",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="Thor STOP/finalize timeout on the background worker (default: 30 s).",
     )
     parser.add_argument(
         "--img-server-ip",
@@ -246,18 +323,67 @@ if __name__ == "__main__":
         "--head-mode",
         type=str,
         choices=["binocular", "mono"],
-        default="binocular",
+        default="mono",
         help="Head camera mode (ros source only). 'binocular': subscribe to both "
-        "/head/left and /head/right and stitch side-by-side (default). 'mono': use "
+        "/head/left and /head/right and stitch side-by-side. 'mono' (default): use "
         "only /head/left; recording emits color_0=head_left, color_1=wrist_left, "
-        "color_2=wrist_right. Use 'mono' when the Thor link can't carry both head "
-        "streams plus tactile (1 GbE saturation).",
+        "color_2=wrist_right, matching Thor's run_all_3cam.sh publisher.",
     )
     parser.add_argument(
         "--network-interface",
         type=str,
         default=None,
-        help="Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.",
+        help="Explicit Unitree DDS interface-name override. By default, exact "
+        "--network-address/--network-peer IPs are used.",
+    )
+    parser.add_argument(
+        "--network-address",
+        type=str,
+        default=WORKSTATION_ROBOT_DDS_ADDRESS,
+        help="Exact workstation Unitree robot DDS address "
+        f"(default: {WORKSTATION_ROBOT_DDS_ADDRESS}).",
+    )
+    parser.add_argument(
+        "--network-peer",
+        type=str,
+        default=THOR_DDS_ADDRESS,
+        help=f"Thor Sharpa DDS discovery peer (default: {THOR_DDS_ADDRESS}).",
+    )
+    parser.add_argument(
+        "--body-dds-peer",
+        action="append",
+        default=None,
+        help="H2 body DDS discovery peer. Repeat for multiple body endpoints; "
+        "accepts IP or IP:PORT. When omitted for a physical H2, the current "
+        "basic_service and humanoid ports are discovered through Thor. Explicit "
+        "values bypass auto-discovery.",
+    )
+    parser.add_argument(
+        "--body-dds-discovery-ssh",
+        type=str,
+        default=DEFAULT_THOR_SSH_TARGET,
+        metavar="[USER@]HOST",
+        help="Thor SSH target used only for automatic H2 DDS port discovery "
+        f"(default: {DEFAULT_THOR_SSH_TARGET}).",
+    )
+    parser.add_argument(
+        "--body-dds-discovery-timeout",
+        type=float,
+        default=35.0,
+        metavar="SECONDS",
+        help="Maximum time to wait for both H2 SPDP announcements (default: 35).",
+    )
+    parser.add_argument(
+        "--camera-network-address",
+        type=str,
+        default=WORKSTATION_DDS_ADDRESS,
+        help=f"Exact workstation ROS camera DDS address (default: {WORKSTATION_DDS_ADDRESS}).",
+    )
+    parser.add_argument(
+        "--camera-network-peer",
+        type=str,
+        default=THOR_DDS_ADDRESS,
+        help=f"Thor ROS camera DDS peer (default: {THOR_DDS_ADDRESS}).",
     )
     parser.add_argument(
         "--human-arm-length",
@@ -334,14 +460,72 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    if args.body_dds_peer is None:
+        args.body_dds_peer = []
+        if args.arm == "H2" and not args.sim and not args.network_interface:
+            if args.body_dds_discovery_timeout <= 0:
+                parser.error("--body-dds-discovery-timeout must be positive")
+            logger_mp.info(
+                "[DDS] discovering current H2 basic_service and humanoid ports "
+                f"through {args.body_dds_discovery_ssh}..."
+            )
+            try:
+                args.body_dds_peer = discover_h2_body_peers_via_ssh(
+                    ssh_target=args.body_dds_discovery_ssh,
+                    source_ip=H2_BODY_DDS_ADDRESSES[0],
+                    timeout_s=args.body_dds_discovery_timeout,
+                )
+            except H2PeerDiscoveryError as exc:
+                parser.error(
+                    "automatic H2 DDS peer discovery failed; robot control was not "
+                    f"started: {exc}. Restore Thor/H2 connectivity or pass explicit "
+                    "--body-dds-peer IP:PORT overrides for both participants"
+                )
+            logger_mp.info(
+                "[DDS] discovered H2 peers: " + ", ".join(args.body_dds_peer)
+            )
+    if args.sharpa_native_capture is not None and (not args.record or args.ee != "sharpa"):
+        parser.error("--sharpa-native-capture requires --record --ee sharpa")
+    if args.sharpa_native_capture_timeout <= 0:
+        parser.error("--sharpa-native-capture-timeout must be positive")
+    if args.sharpa_native_capture_stop_timeout <= 0:
+        parser.error("--sharpa-native-capture-stop-timeout must be positive")
+    try:
+        args.sharpa_tactile_host = resolve_tactile_host(
+            args.sharpa_tactile_host,
+            args.sharpa_native_capture,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     logger_mp.info(f"args: {args}")
+
+    native_capture_client = None
+    active_native_capture_id = None
+    active_native_episode_dir = None
+    pending_native_episode_dir = None
+    pending_native_metadata = None
 
     try:
         # setup dds communication domains id
         if args.sim:
             ChannelFactoryInitialize(1, networkInterface=args.network_interface)
-        else:
+        elif args.network_interface:
             ChannelFactoryInitialize(0, networkInterface=args.network_interface)
+        else:
+            unitree_dds_peers = [args.network_peer, *args.body_dds_peer]
+            ChannelFactoryInitialize(
+                0,
+                networkConfig=build_address_config(
+                    args.network_address,
+                    unitree_dds_peers,
+                    allow_multicast="spdp",
+                ),
+            )
+            logger_mp.info(
+                "[DDS] exact address mapping: "
+                f"workstation={args.network_address} peers={unitree_dds_peers} "
+                "multicast=spdp domain=0"
+            )
 
         # ipc communication mode. client usage: see utils/ipc.py
         if args.ipc:
@@ -364,7 +548,14 @@ if __name__ == "__main__":
         if args.camera_source == "ros":
             from teleop.utils.ros_image_client import ROSImageClient
 
-            img_client = ROSImageClient(head_mode=args.head_mode)
+            img_client = ROSImageClient(
+                head_mode=args.head_mode,
+                cyclonedds_uri=build_address_config(
+                    args.camera_network_address,
+                    args.camera_network_peer,
+                    max_message_size_bytes=1400,
+                ),
+            )
             logger_mp.info(f"[camera] using ROS 2 image source (head_mode={args.head_mode})")
         else:
             img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
@@ -561,6 +752,14 @@ if __name__ == "__main__":
                 frequency=args.frequency,
                 rerun_log=not args.headless,
             )
+            recorder.info["clock_domains"] = {
+                "workstation_monotonic_ns": "Workstation monotonic clock; comparable only within this boot.",
+                "workstation_realtime_ns": "Workstation realtime clock; may be adjusted by time synchronization.",
+                "ros_header_stamp_ns": "Thor ROS publisher stamp; not assumed to be hardware exposure time or workstation-aligned.",
+                "unitree_tick": "Opaque H2 LowState counter; no timestamp unit or epoch is assumed.",
+                "sharpa_tactile_ts": "Sharpa SDK source value stored as tactile.ts; not assumed workstation-aligned.",
+                "sharpa_hand_desired_command": "Latest rt/sharpa/{side}/cmd observed by this recorder; not proof of Thor application.",
+            }
 
             # End-effector joint / tactile metadata
             if args.ee == "sharpa":
@@ -599,10 +798,23 @@ if __name__ == "__main__":
                     right_tactile_names=list(SHARPA_FINGER_NAMES),
                     body_joint_names=_body_joint_names,
                 )
+                # Keep the 30 Hz compatibility stream in every mode so inline
+                # tactile PNG/F6/contact data and existing consumers stay
+                # unchanged. Native capture is an additional Thor-local stream.
                 tactile_sub = SharpaTactile_Subscriber(
                     host=args.sharpa_tactile_host,
                     port=args.sharpa_tactile_port,
                 )
+                if args.sharpa_native_capture is not None:
+                    native_capture_client = SharpaNativeCaptureClient(
+                        address=args.sharpa_native_capture,
+                        request_timeout_s=args.sharpa_native_capture_timeout,
+                        stop_timeout_s=args.sharpa_native_capture_stop_timeout,
+                    )
+                    logger_mp.info(
+                        "[SharpaCapture] native Thor capture control enabled at "
+                        f"{args.sharpa_native_capture}"
+                    )
             else:
                 tactile_sub = None
         else:
@@ -669,17 +881,51 @@ if __name__ == "__main__":
         right_wrist_img = None
 
         # Buffer for t+1 action labeling: action[t] = state[t+1]
-        _sharpa_ee_prev = None  # (left_list, right_list) from previous step
+        _sharpa_ee_prev = None  # (left_list, right_list, receive_timestamps) from previous step
         prev_y_button = False  # for edge detection on Y button
 
         # main loop. robot start to follow VR user's motion
         while not STOP:
             start_time = time.time()
+
+            # STOP/finalize runs on the capture worker.  Consume its result and
+            # write the small local clock/manifest reference only after the ACK;
+            # until then a new native episode is deliberately not ready.
+            if native_capture_client is not None:
+                finalized = native_capture_client.poll_finalized()
+                if finalized is not None:
+                    pending_native_metadata = finalized
+                if pending_native_metadata is not None:
+                    if pending_native_episode_dir is None:
+                        logger_mp.warning(
+                            "[SharpaCapture] cleanup finalized without a local episode: "
+                            f"capture_id={pending_native_metadata.get('capture_id')}"
+                        )
+                        pending_native_metadata = None
+                    else:
+                        try:
+                            metadata_path = write_capture_metadata(
+                                pending_native_episode_dir,
+                                _episode_capture_metadata(
+                                    pending_native_metadata,
+                                    pending_native_episode_dir,
+                                    args.task_name,
+                                ),
+                            )
+                            logger_mp.info(
+                                "[SharpaCapture] finalized local metadata: "
+                                f"{metadata_path} status={pending_native_metadata.get('status')}"
+                            )
+                            pending_native_metadata = None
+                            pending_native_episode_dir = None
+                        except Exception as e:
+                            logger_mp.error(f"[SharpaCapture] metadata write failed; will retry: {e}")
+
             # get image
             if camera_config["head_camera"]["enable_zmq"]:
                 if args.record or xr_need_local_img:
                     head_img = img_client.get_head_frame()
-                if xr_need_local_img:
+                if xr_need_local_img and head_img is not None and head_img.bgr is not None:
                     tv_wrapper.render_to_xr(head_img)
             if camera_config["left_wrist_camera"]["enable_zmq"]:
                 if args.record:
@@ -692,12 +938,85 @@ if __name__ == "__main__":
             if args.record and RECORD_TOGGLE:
                 RECORD_TOGGLE = False
                 if not RECORD_RUNNING:
-                    if recorder.create_episode():
-                        RECORD_RUNNING = True
+                    local_ready = recorder.is_ready()
+                    native_ready = (
+                        native_capture_client is None
+                        or (
+                            native_capture_client.is_ready()
+                            and pending_native_metadata is None
+                            and pending_native_episode_dir is None
+                        )
+                    )
+                    if not local_ready or not native_ready:
+                        logger_mp.warning(
+                            "Recording is still finalizing; START ignored "
+                            f"(local_ready={local_ready}, native_ready={native_ready})."
+                        )
                     else:
-                        logger_mp.error("Failed to create episode. Recording not started.")
+                        capture_started = native_capture_client is None
+                        new_capture_id = None
+                        if native_capture_client is not None:
+                            new_capture_id = native_capture_client.new_capture_id()
+                            try:
+                                native_capture_client.start_capture(
+                                    new_capture_id,
+                                    start_timeout_s=args.sharpa_native_capture_timeout,
+                                )
+                                capture_started = True
+                            except CaptureControlError as e:
+                                pending_native_episode_dir = None
+                                logger_mp.error(
+                                    "[SharpaCapture] START not acknowledged; local recording "
+                                    f"was not started: {e}"
+                                )
+
+                        if capture_started and recorder.create_episode():
+                            if native_capture_client is None:
+                                RECORD_RUNNING = True
+                            else:
+                                active_native_capture_id = new_capture_id
+                                active_native_episode_dir = recorder.episode_dir
+                                try:
+                                    initial_metadata = native_capture_client.session_metadata()
+                                    if initial_metadata is None:
+                                        raise RuntimeError("missing native capture session metadata")
+                                    write_capture_metadata(
+                                        active_native_episode_dir,
+                                        _episode_capture_metadata(
+                                            initial_metadata,
+                                            active_native_episode_dir,
+                                            args.task_name,
+                                        ),
+                                    )
+                                    RECORD_RUNNING = True
+                                except Exception as e:
+                                    logger_mp.error(
+                                        "[SharpaCapture] local episode association failed; "
+                                        f"recording aborted: {e}"
+                                    )
+                                    native_capture_client.stop_capture_async(new_capture_id)
+                                    pending_native_episode_dir = active_native_episode_dir
+                                    active_native_capture_id = None
+                                    active_native_episode_dir = None
+                                    recorder.save_episode()
+                        elif capture_started:
+                            logger_mp.error("Failed to create episode. Recording not started.")
+                            if native_capture_client is not None and new_capture_id is not None:
+                                native_capture_client.stop_capture_async(new_capture_id)
+                                pending_native_episode_dir = None
                 else:
                     RECORD_RUNNING = False
+                    if native_capture_client is not None and active_native_capture_id is not None:
+                        stop_monotonic_ns = time.monotonic_ns()
+                        stop_realtime_ns = time.time_ns()
+                        native_capture_client.stop_capture_async(
+                            active_native_capture_id,
+                            workstation_monotonic_ns=stop_monotonic_ns,
+                            workstation_realtime_ns=stop_realtime_ns,
+                        )
+                        pending_native_episode_dir = active_native_episode_dir
+                        active_native_capture_id = None
+                        active_native_episode_dir = None
                     recorder.save_episode()
                     if args.sim:
                         publish_reset_category(1, reset_pose_publisher)
@@ -758,9 +1077,19 @@ if __name__ == "__main__":
             if not CALIBRATED:
                 continue
 
-            # get current robot state data.
-            current_lr_arm_q = arm_ctrl.get_current_dual_arm_q()
-            current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
+            # Get one coherent H2 LowState copy for arms, waist and timing.
+            # Other robot types retain their existing state accessors.
+            h2_state_timestamps = {}
+            h2_waist_q = None
+            if args.arm == "H2":
+                h2_state_snapshot = arm_ctrl.get_recording_state_snapshot()
+                current_lr_arm_q = h2_state_snapshot["dual_arm_q"]
+                current_lr_arm_dq = h2_state_snapshot["dual_arm_dq"]
+                h2_waist_q = h2_state_snapshot["waist_q"]
+                h2_state_timestamps = h2_state_snapshot["timestamps"]
+            else:
+                current_lr_arm_q = arm_ctrl.get_current_dual_arm_q()
+                current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
 
             # --arm-side semantics: the disabled arm keeps targeting its calibrated
             # init pose every tick, so the IK solver resolves it to a constant joint
@@ -794,11 +1123,26 @@ if __name__ == "__main__":
             time_ik_end = time.time()
             logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
             arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+            h2_command_timestamps = (
+                arm_ctrl.get_command_timing_snapshot() if args.arm == "H2" else {}
+            )
 
             # record data
             if args.record:
-                READY = recorder.is_ready()  # now ready to (2) enter RECORD_RUNNING state
+                READY = recorder.is_ready() and (
+                    native_capture_client is None
+                    or (
+                        native_capture_client.is_ready()
+                        and pending_native_metadata is None
+                        and pending_native_episode_dir is None
+                    )
+                )  # ready only after both local save and Thor finalization
                 # dex hand or gripper
+                sharpa_hand_state_timestamps = {}
+                sharpa_hand_action_proxy_timestamps = {}
+                sharpa_hand_desired_timestamps = {}
+                sharpa_left_desired_q = None
+                sharpa_right_desired_q = None
                 if args.ee == "dex3" and args.input_mode == "hand":
                     with dual_hand_data_lock:
                         left_ee_state = dual_hand_state_array[:7]
@@ -838,9 +1182,17 @@ if __name__ == "__main__":
                         current_body_state = []
                         current_body_action = []
                 elif args.ee == "sharpa":
-                    with dual_hand_data_lock:
-                        curr_left_ee = list(dual_hand_state_array[:SHARPA_DOF])
-                        curr_right_ee = list(dual_hand_state_array[-SHARPA_DOF:])
+                    hand_snapshot = hand_ctrl.get_state_snapshot()
+                    curr_left_ee = hand_snapshot["left"]
+                    curr_right_ee = hand_snapshot["right"]
+                    current_hand_timestamps = hand_snapshot["timestamps"]
+                    sharpa_left_desired_q = hand_snapshot["desired_q"]["left"]
+                    sharpa_right_desired_q = hand_snapshot["desired_q"]["right"]
+                    sharpa_hand_desired_timestamps = {
+                        side: timestamps
+                        for side, timestamps in hand_snapshot["desired_timestamps"].items()
+                        if timestamps
+                    }
                     if all(v == 0.0 for v in curr_left_ee) and all(v == 0.0 for v in curr_right_ee):
                         logger_mp.warning(
                             "[SharpaWave] hand state is ALL ZEROS — check that the bridge "
@@ -850,9 +1202,22 @@ if __name__ == "__main__":
                     # action[t] = state[t+1]: recorded action is the next step's observed state
                     left_ee_state = _sharpa_ee_prev[0] if _sharpa_ee_prev is not None else curr_left_ee
                     right_ee_state = _sharpa_ee_prev[1] if _sharpa_ee_prev is not None else curr_right_ee
+                    sharpa_hand_state_timestamps = (
+                        _sharpa_ee_prev[2]
+                        if _sharpa_ee_prev is not None
+                        else current_hand_timestamps
+                    )
                     left_hand_action = curr_left_ee
                     right_hand_action = curr_right_ee
-                    _sharpa_ee_prev = (curr_left_ee, curr_right_ee)
+                    # This is feedback used as an action proxy, not the glove's
+                    # actual desired/applied command. Preserve its source time
+                    # under an explicitly named field.
+                    sharpa_hand_action_proxy_timestamps = current_hand_timestamps
+                    _sharpa_ee_prev = (
+                        curr_left_ee,
+                        curr_right_ee,
+                        current_hand_timestamps,
+                    )
                     current_body_state = []
                     current_body_action = []
                 else:
@@ -866,7 +1231,7 @@ if __name__ == "__main__":
                 # H2 waist (yaw, roll, pitch) — recorded under body.qpos for state only.
                 # Hardware is read-only for waist (no SDK control), so action stays empty.
                 if args.arm == "H2" and args.record_waist:
-                    current_body_state = arm_ctrl.get_current_waist_q().tolist()
+                    current_body_state = h2_waist_q.tolist()
 
                 # arm state and action
                 left_arm_state = current_lr_arm_q[:7]
@@ -874,11 +1239,13 @@ if __name__ == "__main__":
                 left_arm_action = sol_q[:7]
                 right_arm_action = sol_q[-7:]
                 if RECORD_RUNNING:
+                    sample_monotonic_ns = time.monotonic_ns()
+                    sample_realtime_ns = time.time_ns()
                     colors = {}
                     depths = {}
                     if camera_config["head_camera"]["binocular"]:
                         if camera_config["head_camera"]["enable_zmq"]:
-                            if head_img is not None:
+                            if head_img is not None and head_img.bgr is not None:
                                 colors[f"color_{0}"] = head_img.bgr[
                                     :,
                                     : camera_config["head_camera"]["image_shape"][1] // 2,
@@ -890,28 +1257,28 @@ if __name__ == "__main__":
                             else:
                                 logger_mp.warning("Head image is None!")
                         if camera_config["left_wrist_camera"]["enable_zmq"]:
-                            if left_wrist_img is not None:
+                            if left_wrist_img is not None and left_wrist_img.bgr is not None:
                                 colors[f"color_{2}"] = left_wrist_img.bgr
                             else:
                                 logger_mp.warning("Left wrist image is None!")
                         if camera_config["right_wrist_camera"]["enable_zmq"]:
-                            if right_wrist_img is not None:
+                            if right_wrist_img is not None and right_wrist_img.bgr is not None:
                                 colors[f"color_{3}"] = right_wrist_img.bgr
                             else:
                                 logger_mp.warning("Right wrist image is None!")
                     else:
                         if camera_config["head_camera"]["enable_zmq"]:
-                            if head_img is not None:
+                            if head_img is not None and head_img.bgr is not None:
                                 colors[f"color_{0}"] = head_img.bgr
                             else:
                                 logger_mp.warning("Head image is None!")
                         if camera_config["left_wrist_camera"]["enable_zmq"]:
-                            if left_wrist_img is not None:
+                            if left_wrist_img is not None and left_wrist_img.bgr is not None:
                                 colors[f"color_{1}"] = left_wrist_img.bgr
                             else:
                                 logger_mp.warning("Left wrist image is None!")
                         if camera_config["right_wrist_camera"]["enable_zmq"]:
-                            if right_wrist_img is not None:
+                            if right_wrist_img is not None and right_wrist_img.bgr is not None:
                                 colors[f"color_{2}"] = right_wrist_img.bgr
                             else:
                                 logger_mp.warning("Right wrist image is None!")
@@ -965,25 +1332,73 @@ if __name__ == "__main__":
                             "qpos": current_body_action,
                         },
                     }
+                    # Keep legacy actions.*_ee.qpos as the feedback proxy for
+                    # compatibility. This additive vector is the actual desired
+                    # command observed on rt/sharpa/{side}/cmd.
+                    if sharpa_left_desired_q is not None:
+                        actions["left_ee"]["desired_qpos"] = sharpa_left_desired_q
+                    if sharpa_right_desired_q is not None:
+                        actions["right_ee"]["desired_qpos"] = sharpa_right_desired_q
+                    camera_timestamps = {}
+                    camera_timestamps.update(_frame_camera_timestamps(head_img, "head"))
+                    camera_timestamps.update(
+                        _frame_camera_timestamps(left_wrist_img, "wrist_left")
+                    )
+                    camera_timestamps.update(
+                        _frame_camera_timestamps(right_wrist_img, "wrist_right")
+                    )
+                    item_timestamps = {
+                        "workstation_monotonic_ns": sample_monotonic_ns,
+                        "workstation_realtime_ns": sample_realtime_ns,
+                        "cameras": camera_timestamps,
+                    }
+                    if h2_state_timestamps:
+                        item_timestamps["h2_lowstate"] = h2_state_timestamps
+                    if h2_command_timestamps:
+                        item_timestamps["h2_arm_command"] = h2_command_timestamps
+                    if sharpa_hand_state_timestamps:
+                        item_timestamps["sharpa_hand_state"] = sharpa_hand_state_timestamps
+                    if sharpa_hand_action_proxy_timestamps:
+                        item_timestamps["sharpa_hand_action_proxy"] = (
+                            sharpa_hand_action_proxy_timestamps
+                        )
+                    if sharpa_hand_desired_timestamps:
+                        item_timestamps["sharpa_hand_desired_command"] = (
+                            sharpa_hand_desired_timestamps
+                        )
+                    native_marker = None
+                    if native_capture_client is not None and active_native_capture_id is not None:
+                        native_marker = {
+                            "protocol": SHARPA_CAPTURE_PROTOCOL,
+                            "capture_id": active_native_capture_id,
+                            "workstation_monotonic_ns": sample_monotonic_ns,
+                            "workstation_realtime_ns": sample_realtime_ns,
+                        }
+
                     tactiles = tactile_sub.snapshot() if tactile_sub is not None else None
-                    if args.sim:
-                        sim_state = sim_state_subscriber.read_data()
-                        recorder.add_item(
-                            colors=colors,
-                            depths=depths,
-                            states=states,
-                            actions=actions,
-                            tactiles=tactiles,
-                            sim_state=sim_state,
+                    sim_state = sim_state_subscriber.read_data() if args.sim else None
+                    item_idx = recorder.add_item(
+                        colors=colors,
+                        depths=depths,
+                        states=states,
+                        actions=actions,
+                        tactiles=tactiles,
+                        sim_state=sim_state,
+                        timestamps=item_timestamps,
+                        native_capture=native_marker,
+                    )
+                    if native_marker is not None:
+                        marker_accepted = native_capture_client.enqueue_sample(
+                            active_native_capture_id,
+                            item_idx,
+                            workstation_monotonic_ns=sample_monotonic_ns,
+                            workstation_realtime_ns=sample_realtime_ns,
                         )
-                    else:
-                        recorder.add_item(
-                            colors=colors,
-                            depths=depths,
-                            states=states,
-                            actions=actions,
-                            tactiles=tactiles,
-                        )
+                        if not marker_accepted:
+                            logger_mp.error(
+                                "[SharpaCapture] SAMPLE marker dropped; episode will be marked "
+                                f"invalid (idx={item_idx})"
+                            )
 
             current_time = time.time()
             time_elapsed = current_time - start_time
@@ -998,6 +1413,28 @@ if __name__ == "__main__":
 
         logger_mp.error(traceback.format_exc())
     finally:
+        # Queue native STOP before moving the robot home, but never wait for Thor
+        # disk finalization on the control/shutdown path yet.  The worker runs in
+        # parallel with the existing cleanup below.
+        try:
+            if native_capture_client is not None:
+                capture_id_to_stop = (
+                    active_native_capture_id or native_capture_client.active_capture_id()
+                )
+                if capture_id_to_stop is not None:
+                    stop_queued = native_capture_client.stop_capture_async(
+                        capture_id_to_stop,
+                        workstation_monotonic_ns=time.monotonic_ns(),
+                        workstation_realtime_ns=time.time_ns(),
+                    )
+                    if stop_queued:
+                        if pending_native_episode_dir is None:
+                            pending_native_episode_dir = active_native_episode_dir
+                        active_native_capture_id = None
+                        active_native_episode_dir = None
+        except Exception as e:
+            logger_mp.error(f"[SharpaCapture] failed to queue STOP during shutdown: {e}")
+
         try:
             arm_ctrl.ctrl_dual_arm_go_home()
         except Exception as e:
@@ -1042,5 +1479,37 @@ if __name__ == "__main__":
                 recorder.close()
         except Exception as e:
             logger_mp.error(f"Failed to close recorder: {e}")
+
+        try:
+            if native_capture_client is not None:
+                finalized = native_capture_client.poll_finalized()
+                if finalized is None and not native_capture_client.is_ready():
+                    finalized = native_capture_client.wait_finalized(
+                        args.sharpa_native_capture_stop_timeout + 0.5
+                    )
+                if finalized is not None:
+                    pending_native_metadata = finalized
+                if pending_native_metadata is None and pending_native_episode_dir is not None:
+                    # Preserve a conservative failure record if Thor never
+                    # acknowledged STOP before shutdown.
+                    pending_native_metadata = native_capture_client.session_metadata() or {}
+                    pending_native_metadata["status"] = "invalid"
+                    pending_native_metadata["valid"] = False
+                    reasons = list(pending_native_metadata.get("degraded_reasons", []))
+                    reasons.append("shutdown before STOP/finalize acknowledgement")
+                    pending_native_metadata["degraded_reasons"] = reasons
+                if pending_native_metadata is not None and pending_native_episode_dir is not None:
+                    metadata_path = write_capture_metadata(
+                        pending_native_episode_dir,
+                        _episode_capture_metadata(
+                            pending_native_metadata,
+                            pending_native_episode_dir,
+                            args.task_name,
+                        ),
+                    )
+                    logger_mp.info(f"[SharpaCapture] shutdown metadata: {metadata_path}")
+                native_capture_client.close(timeout_s=1.0)
+        except Exception as e:
+            logger_mp.error(f"[SharpaCapture] failed to finalize local metadata: {e}")
         logger_mp.info("✅ Finally, exiting program.")
         exit(0)

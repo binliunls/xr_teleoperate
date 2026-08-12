@@ -1,10 +1,10 @@
 """
 SharpaWave dexterous hand state subscriber for xr_teleoperate.
 
-Read-only — subscribes to the Sharpa hand joint-state topics on DDS and exposes
-the angles via shared arrays for recording. Does NOT send commands; commands
-are sent by the retargeting daemon (e.g. retargeting_manus_demo_dds.py) running
-in parallel on the same DDS domain.
+Read-only — subscribes to the Sharpa hand joint-state and command topics on DDS
+and exposes them for recording. It does NOT send commands; commands are sent by
+the retargeting daemon (for example avatar_hand_dds_bridge.py) running in
+parallel on the same DDS domain.
 
 The state topics can be published by either:
   - the C++ bridge on Thor (scripts/sharpa_dds_bridge), or
@@ -13,6 +13,8 @@ The state topics can be published by either:
 Topics:
   rt/sharpa/left/state   — 22 joints, motor_state[i].q in degrees
   rt/sharpa/right/state  — 22 joints, motor_state[i].q in degrees
+  rt/sharpa/left/cmd     — 22 desired joints, motor_cmd[i].q in radians
+  rt/sharpa/right/cmd    — 22 desired joints, motor_cmd[i].q in radians
 
 22 DOF / hand joint order:
     thumb:  CMC_FE, CMC_AA, MCP_FE, MCP_AA, IP        (5)
@@ -46,6 +48,17 @@ SHARPA_F6 = 6
 SHARPA_TACTILE_PER_HAND = SHARPA_TACTILE_CHANNELS * SHARPA_F6  # 30
 
 
+def _sharpa_desired_q(msg):
+    """Extract one complete desired joint vector without padding/invention."""
+    motor_cmd = getattr(msg, "motor_cmd", None)
+    if motor_cmd is None or len(motor_cmd) < SHARPA_DOF:
+        return None
+    return np.array(
+        [float(motor_cmd[i].q) for i in range(SHARPA_DOF)],
+        dtype=np.float64,
+    )
+
+
 class SharpaFingerIndex(IntEnum):
     THUMB = 0
     INDEX = 1
@@ -56,7 +69,7 @@ class SharpaFingerIndex(IntEnum):
 
 class SharpaWave_Controller:
     """
-    Reads Sharpa hand joint states from DDS and exposes them via shared arrays.
+    Reads Sharpa hand state and desired-command topics from DDS for recording.
 
     Requires a publisher of rt/sharpa/{left,right}/state on the same DDS domain
     (the C++ bridge on Thor, or the retargeting demo in -sdk -dds mode).
@@ -82,6 +95,12 @@ class SharpaWave_Controller:
     ):
         logger_mp.info("Initialize SharpaWave_Controller (DDS thread mode)...")
         self.fps = fps
+        self._snapshot_lock = threading.Lock()
+        self._left_angles = np.zeros(SHARPA_DOF, dtype=np.float64)
+        self._right_angles = np.zeros(SHARPA_DOF, dtype=np.float64)
+        self._state_timestamps = {"left": {}, "right": {}}
+        self._desired_q = {"left": None, "right": None}
+        self._desired_timestamps = {"left": {}, "right": {}}
 
         ctrl_thread = threading.Thread(
             target=self._control_thread,
@@ -91,19 +110,50 @@ class SharpaWave_Controller:
         ctrl_thread.start()
         logger_mp.info("Initialize SharpaWave_Controller OK!")
 
+    def get_state_snapshot(self):
+        """Return states, desired commands and receive times atomically."""
+        with self._snapshot_lock:
+            return {
+                "left": self._left_angles.tolist(),
+                "right": self._right_angles.tolist(),
+                "timestamps": {
+                    "left": dict(self._state_timestamps["left"]),
+                    "right": dict(self._state_timestamps["right"]),
+                },
+                "desired_q": {
+                    "left": None
+                    if self._desired_q["left"] is None
+                    else self._desired_q["left"].tolist(),
+                    "right": None
+                    if self._desired_q["right"] is None
+                    else self._desired_q["right"].tolist(),
+                },
+                "desired_timestamps": {
+                    "left": dict(self._desired_timestamps["left"]),
+                    "right": dict(self._desired_timestamps["right"]),
+                },
+            }
+
     def _control_thread(self, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array):
         # DDS factory is already initialised by the main process — just create subscribers.
         from unitree_sdk2py.core.channel import ChannelSubscriber
-        from unitree_sdk2py.idl.unitree_hg.msg.dds_ import HandState_
+        from unitree_sdk2py.idl.unitree_hg.msg.dds_ import HandCmd_, HandState_
 
         sub_left = ChannelSubscriber("rt/sharpa/left/state", HandState_)
         sub_left.Init()
         sub_right = ChannelSubscriber("rt/sharpa/right/state", HandState_)
         sub_right.Init()
-        logger_mp.info("[SharpaWave] subscribed to rt/sharpa/{left,right}/state")
+        cmd_sub_left = ChannelSubscriber("rt/sharpa/left/cmd", HandCmd_)
+        cmd_sub_left.Init()
+        cmd_sub_right = ChannelSubscriber("rt/sharpa/right/cmd", HandCmd_)
+        cmd_sub_right.Init()
+        logger_mp.info("[SharpaWave] subscribed to rt/sharpa/{left,right}/{state,cmd}")
 
         left_angles = np.zeros(SHARPA_DOF, dtype=np.float64)
         right_angles = np.zeros(SHARPA_DOF, dtype=np.float64)
+        state_timestamps = {"left": {}, "right": {}}
+        desired_q = {"left": None, "right": None}
+        desired_timestamps = {"left": {}, "right": {}}
         period = 1.0 / self.fps
 
         try:
@@ -112,15 +162,57 @@ class SharpaWave_Controller:
 
                 msg = sub_left.Read()
                 if msg is not None and msg.motor_state:
+                    state_timestamps["left"] = {
+                        "workstation_receive_monotonic_ns": time.monotonic_ns(),
+                        "workstation_receive_realtime_ns": time.time_ns(),
+                    }
                     n = min(len(msg.motor_state), SHARPA_DOF)
                     for i in range(n):
                         left_angles[i] = math.radians(msg.motor_state[i].q)
 
                 msg = sub_right.Read()
                 if msg is not None and msg.motor_state:
+                    state_timestamps["right"] = {
+                        "workstation_receive_monotonic_ns": time.monotonic_ns(),
+                        "workstation_receive_realtime_ns": time.time_ns(),
+                    }
                     n = min(len(msg.motor_state), SHARPA_DOF)
                     for i in range(n):
                         right_angles[i] = math.radians(msg.motor_state[i].q)
+
+                msg = cmd_sub_left.Read()
+                left_desired_q = _sharpa_desired_q(msg)
+                if left_desired_q is not None:
+                    desired_timestamps["left"] = {
+                        "workstation_receive_monotonic_ns": time.monotonic_ns(),
+                        "workstation_receive_realtime_ns": time.time_ns(),
+                    }
+                    desired_q["left"] = left_desired_q
+
+                msg = cmd_sub_right.Read()
+                right_desired_q = _sharpa_desired_q(msg)
+                if right_desired_q is not None:
+                    desired_timestamps["right"] = {
+                        "workstation_receive_monotonic_ns": time.monotonic_ns(),
+                        "workstation_receive_realtime_ns": time.time_ns(),
+                    }
+                    desired_q["right"] = right_desired_q
+
+                with self._snapshot_lock:
+                    self._left_angles = left_angles.copy()
+                    self._right_angles = right_angles.copy()
+                    self._state_timestamps = {
+                        "left": dict(state_timestamps["left"]),
+                        "right": dict(state_timestamps["right"]),
+                    }
+                    self._desired_q = {
+                        "left": None if desired_q["left"] is None else desired_q["left"].copy(),
+                        "right": None if desired_q["right"] is None else desired_q["right"].copy(),
+                    }
+                    self._desired_timestamps = {
+                        "left": dict(desired_timestamps["left"]),
+                        "right": dict(desired_timestamps["right"]),
+                    }
 
                 if dual_hand_state_array is not None and dual_hand_action_array is not None:
                     combined = np.concatenate([left_angles, right_angles])
@@ -155,7 +247,8 @@ class SharpaTactile_Subscriber:
         self._port = port
         self._zmq = zmq
 
-        self._cache = {}                       # channel -> wire.TactileMessage
+        # channel -> (wire.TactileMessage, receive_monotonic_ns, receive_realtime_ns)
+        self._cache = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
 
@@ -190,6 +283,8 @@ class SharpaTactile_Subscriber:
                         payload = socket.recv(flags=zmq.NOBLOCK)
                     except zmq.Again:
                         break
+                    receive_monotonic_ns = time.monotonic_ns()
+                    receive_realtime_ns = time.time_ns()
                     try:
                         msg = wire.unpack(payload)
                     except Exception as e:
@@ -202,8 +297,11 @@ class SharpaTactile_Subscriber:
                             f"[SharpaTactile] drop msg with bad channel={msg.channel}"
                         )
                         continue
-                    with self._lock:
-                        self._cache[msg.channel] = msg
+                    self._store_message(
+                        msg,
+                        receive_monotonic_ns=receive_monotonic_ns,
+                        receive_realtime_ns=receive_realtime_ns,
+                    )
         finally:
             socket.close()
             logger_mp.info("[SharpaTactile] subscriber thread closed.")
@@ -217,7 +315,10 @@ class SharpaTactile_Subscriber:
                                           "f6": [float]*6,
                                           "contact_point": [float]*3N,
                                           "ts": float,
-                                          "frame_id": int}, ...},
+                                          "frame_id": int,
+                                          "joint_qpos": [float]*22 (radians, optional),
+                                          "workstation_receive_monotonic_ns": int,
+                                          "workstation_receive_realtime_ns": int}, ...},
               "right_ee": {...}
             }
 
@@ -230,16 +331,30 @@ class SharpaTactile_Subscriber:
             cached = list(self._cache.values())
 
         out = {"left_ee": {}, "right_ee": {}}
-        for msg in cached:
+        for msg, receive_monotonic_ns, receive_realtime_ns in cached:
             hand, finger = msg.hand_finger
-            out[hand][finger] = {
+            entry = {
                 "deform": msg.deform,
                 "f6": [float(x) for x in msg.f6],
                 "contact_point": [float(x) for x in msg.contact_point],
                 "ts": msg.ts,
                 "frame_id": msg.frame_id,
+                "workstation_receive_monotonic_ns": receive_monotonic_ns,
+                "workstation_receive_realtime_ns": receive_realtime_ns,
             }
+            if msg.joints is not None:
+                entry["joint_qpos"] = [math.radians(float(x)) for x in msg.joints]
+            out[hand][finger] = entry
         return out
+
+    def _store_message(self, msg, *, receive_monotonic_ns, receive_realtime_ns):
+        """Atomically pair a tactile frame with its workstation receive clocks."""
+        with self._lock:
+            self._cache[msg.channel] = (
+                msg,
+                int(receive_monotonic_ns),
+                int(receive_realtime_ns),
+            )
 
     def close(self):
         self._stop.set()

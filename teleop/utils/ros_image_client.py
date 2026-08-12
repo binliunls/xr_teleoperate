@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -46,6 +46,7 @@ class ROSFrame:
     fps: float = 0.0
     bgr_array: Optional[np.ndarray] = None
     jpg: Optional[bytes] = None  # not used by ROS path; kept for interface parity
+    camera_timestamps: dict = field(default_factory=dict)
 
     @property
     def bgr(self) -> Optional[np.ndarray]:
@@ -91,14 +92,29 @@ class _Subscriber:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.latest: Optional[np.ndarray] = None
+        self.latest_timestamps: dict = {}
         self.timestamps: list = []
         self.height = 0
         self.width = 0
 
-    def push(self, frame: np.ndarray) -> None:
+    def push(
+        self,
+        frame: np.ndarray,
+        *,
+        source_timestamp_ns: Optional[int],
+        workstation_receive_monotonic_ns: int,
+        workstation_receive_realtime_ns: int,
+    ) -> None:
         now = time.monotonic()
         with self.lock:
             self.latest = frame
+            self.latest_timestamps = {
+                # Preserve the ROS header clock verbatim. It is not assumed to
+                # share a clock domain with workstation monotonic/realtime.
+                "ros_header_stamp_ns": source_timestamp_ns,
+                "workstation_receive_monotonic_ns": workstation_receive_monotonic_ns,
+                "workstation_receive_realtime_ns": workstation_receive_realtime_ns,
+            }
             self.height, self.width = frame.shape[:2]
             self.timestamps.append(now)
             cutoff = now - 1.0
@@ -107,7 +123,7 @@ class _Subscriber:
 
     def snapshot(self) -> tuple:
         with self.lock:
-            return self.latest, float(len(self.timestamps))
+            return self.latest, float(len(self.timestamps)), dict(self.latest_timestamps)
 
 
 # ── client class ─────────────────────────────────────────────────────────────
@@ -133,9 +149,14 @@ class ROSImageClient:
         self._head_mode = head_mode
 
         # configure RMW before importing rclpy
-        os.environ.setdefault("RMW_IMPLEMENTATION", DEFAULT_RMW)
         if cyclonedds_uri:
-            os.environ.setdefault("CYCLONEDDS_URI", cyclonedds_uri)
+            # An explicit deployment mapping must override stale shell-wide DDS
+            # settings left from the previous Thor address.
+            os.environ["RMW_IMPLEMENTATION"] = DEFAULT_RMW
+            os.environ["ROS_DOMAIN_ID"] = "0"
+            os.environ["CYCLONEDDS_URI"] = cyclonedds_uri
+        else:
+            os.environ.setdefault("RMW_IMPLEMENTATION", DEFAULT_RMW)
 
         try:
             import rclpy
@@ -170,10 +191,22 @@ class ROSImageClient:
 
         def _make_cb(name: str):
             def _cb(msg):
+                receive_monotonic_ns = time.monotonic_ns()
+                receive_realtime_ns = time.time_ns()
+                source_timestamp_ns = None
+                header = getattr(msg, "header", None)
+                stamp = getattr(header, "stamp", None)
+                if stamp is not None and hasattr(stamp, "sec") and hasattr(stamp, "nanosec"):
+                    source_timestamp_ns = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
                 frame = _msg_to_bgr(msg)
                 if frame is None:
                     return
-                self._subs[name].push(frame)
+                self._subs[name].push(
+                    frame,
+                    source_timestamp_ns=source_timestamp_ns,
+                    workstation_receive_monotonic_ns=receive_monotonic_ns,
+                    workstation_receive_realtime_ns=receive_realtime_ns,
+                )
 
             return _cb
 
@@ -199,12 +232,12 @@ class ROSImageClient:
     def _warmup_head(self, timeout: float, require: bool) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            left, _ = self._subs["head_left"].snapshot()
+            left, _, _ = self._subs["head_left"].snapshot()
             if self._head_mode == "mono":
                 if left is not None:
                     return
             else:
-                right, _ = self._subs["head_right"].snapshot()
+                right, _, _ = self._subs["head_right"].snapshot()
                 if left is not None and right is not None:
                     return
             time.sleep(0.05)
@@ -224,7 +257,7 @@ class ROSImageClient:
     def get_cam_config(self) -> dict:
         """Return a config dict shaped like teleimager.cam_config_client.yaml."""
         # Use head_left shape as the per-eye dimensions; binocular doubles the width.
-        hl_frame, _ = self._subs["head_left"].snapshot()
+        hl_frame, _, _ = self._subs["head_left"].snapshot()
         if hl_frame is not None:
             h, w = hl_frame.shape[:2]
         else:
@@ -236,7 +269,7 @@ class ROSImageClient:
             head_image_shape = [h, w]
             head_binocular = False
 
-        wl_frame, _ = self._subs["wrist_left"].snapshot()
+        wl_frame, _, _ = self._subs["wrist_left"].snapshot()
         if wl_frame is not None:
             wh, ww = wl_frame.shape[:2]
             wrist_image_shape = [wh, ww]
@@ -277,12 +310,16 @@ class ROSImageClient:
         }
 
     def get_head_frame(self) -> ROSFrame:
-        left_frame, l_fps = self._subs["head_left"].snapshot()
+        left_frame, l_fps, left_timestamps = self._subs["head_left"].snapshot()
         if self._head_mode == "mono":
             if left_frame is None:
                 return ROSFrame(fps=0.0, bgr_array=None)
-            return ROSFrame(fps=l_fps, bgr_array=left_frame)
-        right_frame, r_fps = self._subs["head_right"].snapshot()
+            return ROSFrame(
+                fps=l_fps,
+                bgr_array=left_frame,
+                camera_timestamps={"head_left": left_timestamps},
+            )
+        right_frame, r_fps, right_timestamps = self._subs["head_right"].snapshot()
         if left_frame is None or right_frame is None:
             return ROSFrame(fps=0.0, bgr_array=None)
         # Resize right to match left if dims drift (shouldn't normally).
@@ -294,15 +331,30 @@ class ROSImageClient:
             except Exception:
                 return ROSFrame(fps=0.0, bgr_array=None)
         stitched = np.concatenate((left_frame, right_frame), axis=1)
-        return ROSFrame(fps=min(l_fps, r_fps), bgr_array=stitched)
+        return ROSFrame(
+            fps=min(l_fps, r_fps),
+            bgr_array=stitched,
+            camera_timestamps={
+                "head_left": left_timestamps,
+                "head_right": right_timestamps,
+            },
+        )
 
     def get_left_wrist_frame(self) -> ROSFrame:
-        frame, fps = self._subs["wrist_left"].snapshot()
-        return ROSFrame(fps=fps, bgr_array=frame)
+        frame, fps, timestamps = self._subs["wrist_left"].snapshot()
+        return ROSFrame(
+            fps=fps,
+            bgr_array=frame,
+            camera_timestamps={"wrist_left": timestamps} if frame is not None else {},
+        )
 
     def get_right_wrist_frame(self) -> ROSFrame:
-        frame, fps = self._subs["wrist_right"].snapshot()
-        return ROSFrame(fps=fps, bgr_array=frame)
+        frame, fps, timestamps = self._subs["wrist_right"].snapshot()
+        return ROSFrame(
+            fps=fps,
+            bgr_array=frame,
+            camera_timestamps={"wrist_right": timestamps} if frame is not None else {},
+        )
 
     def close(self) -> None:
         self._stop.set()

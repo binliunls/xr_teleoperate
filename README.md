@@ -36,6 +36,16 @@
 
 # 🔖[Release Note](CHANGELOG.md)
 
+## H2 + Sharpa native tactile capture
+
+The workstation-side H2 teleop, timestamp, and episode integration is
+documented in
+[`teleop/docs/sharpa_native_180_capture.md`](teleop/docs/sharpa_native_180_capture.md).
+For that deployment, this repository is the source of truth for workstation
+code; the paired `sharpa-teleop` repository is the source of truth for the
+Thor DDS bridge and native tactile recorder. Keep the corresponding commits
+from both repositories together when deploying or reviewing the feature.
+
 ## 🏷️ v1.5 (2025.12.29)
 
 - support simulation

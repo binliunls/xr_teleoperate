@@ -15,13 +15,14 @@ stream, decode, or resample the 180 Hz tactile payload while teleop is running.
 | Avatar glove bridge | Workstation | Publishes the same 30 Hz DDS hand commands and consumes the same port-7779 haptic feedback used before native capture was added |
 | `teleop_hand_and_arm.py` | Workstation | Runs H2 teleop and writes the existing episode at 30 Hz, plus capture identifiers and alignment markers |
 
-The one-time Thor container setup is documented in the paired `sharpa-teleop`
-repository at `thor/docker_5_0_1/README.md` and in the deployed Thor copy at
-`/home/unitree/sharpa180/README.md`. The runtime commands below assume that
+The complete Thor placement and provisioning procedure is documented in the
+paired `sharpa-teleop` repository at `thor/deploy/README.md`; the runtime and
+capture details are in `thor/docker_5_0_1/README.md` and the deployed Thor copy
+at `/home/unitree/sharpa180/README.md`. The runtime commands below assume that
 setup has already been completed.
 
 The compatible Thor-side implementation is `sharpa-teleop` commit
-`cdd8985bf64a24be95efc13c8b1d9b0031a93bb2` on branch
+`03ef34376daff2ba4f3fd332bc387ce50a515011` on branch
 `haochens/180hz-tactile-capture`. Keep that revision paired with this
 workstation branch when deploying or reviewing the capture path.
 

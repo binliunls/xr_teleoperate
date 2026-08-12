@@ -44,7 +44,7 @@ repository:
 ```text
 repository: https://github.com/shcSteven/sensing_h2_ros_gstreamer.git
 branch:     haochens/h2-125-camera-dds
-commit:     6a621672dd59441648eba6fb15d67f715cf4358b
+commit:     33246e338cd6b6f0a01cbe510b5f70e1fd48c5fb
 ```
 
 An authorized collaborator can reproduce that checkout with:
@@ -70,8 +70,10 @@ scripts/visualize_camera_streams.py
 ```
 
 The first two Thor-side files must also be present in the camera checkout used
-on Thor. These files are not supplied by `xr_teleoperate`; copying or cloning
-only this repository cannot reproduce the camera publisher.
+on Thor. Follow that repository's `docs/thor-deployment.md` for its fixed Thor
+placement, pinned `gscam2` source, trigger controls, and optional boot services.
+These files are not supplied by `xr_teleoperate`; copying or cloning only this
+repository cannot reproduce the camera publisher.
 
 ### Thor native-capture repository
 
@@ -81,10 +83,13 @@ same Thor remains deployed. Its compatible native-capture implementation is:
 ```text
 repository: https://github.com/isaac-for-healthcare/sharpa-teleop.git
 branch:     haochens/180hz-tactile-capture
-commit:     cdd8985bf64a24be95efc13c8b1d9b0031a93bb2
+commit:     03ef34376daff2ba4f3fd332bc387ce50a515011
 ```
 
-It must be deployed on Thor if Thor is being provisioned from scratch.
+It must be deployed on Thor if Thor is being provisioned from scratch. Follow
+that repository's `thor/deploy/README.md` for the canonical checkout path,
+bridge build, persistent hand-link setup, pinned containers, and manual
+calibration/startup contract.
 
 ## Workstation software
 

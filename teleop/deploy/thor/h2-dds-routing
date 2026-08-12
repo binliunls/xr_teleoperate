@@ -2,7 +2,9 @@
 set -eu
 
 H2_INTERFACE="eth10"
-WORKSTATION_INTERFACE="enx80691a14d263"
+# A systemd Environment= override may select another Thor USB Ethernet name.
+# Keep this default aligned with install_thor_usb_ethernet.sh.
+WORKSTATION_INTERFACE="${WORKSTATION_INTERFACE:-enx80691a14d263}"
 H2_ADDRESS="192.168.123.163/24"
 H2_ROBOT="192.168.123.161"
 WORKSTATION_ROBOT_ADDRESS="192.168.123.222"

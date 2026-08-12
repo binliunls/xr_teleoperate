@@ -338,8 +338,13 @@ load.
 
 ## Source-controlled deployment files
 
+- Thor install destinations, commands, and reboot acceptance checks:
+  [`../deploy/thor/README.md`](../deploy/thor/README.md)
+- Thor persistent USB Ethernet installer:
+  `teleop/deploy/thor/install_thor_usb_ethernet.sh`
 - Thor H2 route script: `teleop/deploy/thor/h2-dds-routing`
 - Thor H2 route service: `teleop/deploy/thor/h2-dds-routing.service`
+- Thor H2 chrony source: `teleop/deploy/thor/50-h2-source.conf`
 - Thor chrony client allow rule: `teleop/deploy/thor/60-h2-workstation.conf`
 - Workstation timesyncd configuration: `teleop/deploy/workstation/60-h2-thor.conf`
 - Dynamic H2 discovery helper: `teleop/utils/discover_h2_dds_peer.py`

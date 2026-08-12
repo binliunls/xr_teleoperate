@@ -18,8 +18,8 @@ Feedback path (hand tactile -> glove haptics):
     -> parse F6 (Fx,Fy,Fz) -> glove.set_task({"key":"set_3d_force", ...})
     -> Avatar glove fingertip LRA feedback.
 
-The Thor side and teleop_hand_and_arm.py are unchanged: teleop keeps reading
-rt/sharpa/{side}/state for recording, and keeps recording tactile off :7779.
+The Thor bridge and teleop_hand_and_arm.py use the same explicit .125 DDS
+mapping: teleop reads rt/sharpa/{side}/state and records tactile from :7779.
 
 Run in the `tv` conda env (py3.10; has avatar_sdk 1.6.2 + unitree_sdk2py + zmq).
 """
@@ -51,6 +51,11 @@ from avatar_sdk import (  # noqa: E402
 )
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize  # noqa: E402
 from robot_control.robot_hand_sharpa_dds import SharpaHandDDSClient, NUM_JOINTS  # noqa: E402
+from utils.unitree_dds_network import (  # noqa: E402
+    THOR_DDS_ADDRESS,
+    WORKSTATION_DDS_ADDRESS,
+    build_address_config,
+)
 
 logger = logging.getLogger("avatar_bridge")
 
@@ -108,10 +113,16 @@ def main() -> int:
     p.add_argument("--side", choices=("left", "right", "both"), default="both")
     p.add_argument("--transport", choices=("wireless", "wired"), default="wireless")
     p.add_argument("--config", default=str(SDK_PREFIX / "share/sdk_config.json"))
-    p.add_argument("--rate-hz", type=float, default=120.0, help="Per-hand ROBOT fetch/publish rate")
+    p.add_argument("--rate-hz", type=float, default=30.0, help="Per-hand ROBOT fetch/publish rate")
     p.add_argument("--dds-domain", type=int, default=0, help="Must match Thor sharpa_dds_bridge")
-    p.add_argument("--dds-interface", default=None, help="DDS network interface (default: auto)")
-    p.add_argument("--tactile-host", default="192.168.123.163")
+    p.add_argument(
+        "--dds-interface",
+        default=None,
+        help="Explicit DDS interface-name override; otherwise use --dds-address/--dds-peer",
+    )
+    p.add_argument("--dds-address", default=WORKSTATION_DDS_ADDRESS)
+    p.add_argument("--dds-peer", default=THOR_DDS_ADDRESS)
+    p.add_argument("--tactile-host", default=THOR_DDS_ADDRESS)
     p.add_argument("--tactile-port", type=int, default=7779)
     p.add_argument("--no-haptics", action="store_true", help="Disable tactile->glove feedback")
     p.add_argument("--force-scale", type=float, default=1.0, help="Scale F6 before set_3d_force")
@@ -127,9 +138,14 @@ def main() -> int:
     if not args.dry_run:
         if args.dds_interface:
             ChannelFactoryInitialize(args.dds_domain, networkInterface=args.dds_interface)
+            dds_endpoint = f"interface={args.dds_interface}"
         else:
-            ChannelFactoryInitialize(args.dds_domain)
-        logger.info("DDS domain=%d interface=%s", args.dds_domain, args.dds_interface or "auto")
+            ChannelFactoryInitialize(
+                args.dds_domain,
+                networkConfig=build_address_config(args.dds_address, args.dds_peer),
+            )
+            dds_endpoint = f"address={args.dds_address} peer={args.dds_peer}"
+        logger.info("DDS domain=%d %s", args.dds_domain, dds_endpoint)
 
     # ---- Avatar SDK ----
     config_text = _load_config(Path(args.config), args.transport)

@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+H2_INTERFACE="eth10"
+# A systemd Environment= override may select another Thor USB Ethernet name.
+# Keep this default aligned with install_thor_usb_ethernet.sh.
+WORKSTATION_INTERFACE="${WORKSTATION_INTERFACE:-enx80691a14d263}"
+H2_ADDRESS="192.168.123.163/24"
+H2_ROBOT="192.168.123.161"
+WORKSTATION_ROBOT_ADDRESS="192.168.123.222"
+THOR_WORKSTATION_ADDRESS="192.168.125.163"
+
+# NetworkManager and the existing Sharpa tactile service configure these links
+# independently. Wait for their devices and the persistent .125 address before
+# adding the routed H2 path.
+remaining=60
+while [ "$remaining" -gt 0 ]; do
+    if ip link show "$H2_INTERFACE" >/dev/null 2>&1 \
+        && ip link show "$WORKSTATION_INTERFACE" >/dev/null 2>&1 \
+        && ip -4 address show dev "$WORKSTATION_INTERFACE" \
+            | grep -Fq "inet ${THOR_WORKSTATION_ADDRESS}/24"; then
+        break
+    fi
+    remaining=$((remaining - 1))
+    sleep 1
+done
+
+if [ "$remaining" -eq 0 ]; then
+    echo "H2 DDS routing prerequisites did not appear within 60 seconds" >&2
+    exit 1
+fi
+
+ip address replace "$H2_ADDRESS" dev "$H2_INTERFACE"
+ip route replace "${WORKSTATION_ROBOT_ADDRESS}/32" \
+    dev "$WORKSTATION_INTERFACE" scope link
+
+sysctl -q -w net.ipv4.ip_forward=1
+sysctl -q -w "net.ipv4.conf.${H2_INTERFACE}.proxy_arp=1"
+
+if ! iptables -C FORWARD \
+    -i "$WORKSTATION_INTERFACE" -o "$H2_INTERFACE" \
+    -s "${WORKSTATION_ROBOT_ADDRESS}/32" -d "${H2_ROBOT}/32" \
+    -j ACCEPT 2>/dev/null; then
+    iptables -I FORWARD 1 \
+        -i "$WORKSTATION_INTERFACE" -o "$H2_INTERFACE" \
+        -s "${WORKSTATION_ROBOT_ADDRESS}/32" -d "${H2_ROBOT}/32" \
+        -j ACCEPT
+fi
+
+if ! iptables -C FORWARD \
+    -i "$H2_INTERFACE" -o "$WORKSTATION_INTERFACE" \
+    -s "${H2_ROBOT}/32" -d "${WORKSTATION_ROBOT_ADDRESS}/32" \
+    -j ACCEPT 2>/dev/null; then
+    iptables -I FORWARD 1 \
+        -i "$H2_INTERFACE" -o "$WORKSTATION_INTERFACE" \
+        -s "${H2_ROBOT}/32" -d "${WORKSTATION_ROBOT_ADDRESS}/32" \
+        -j ACCEPT
+fi
+
+# chronyd starts before the H2 alias on this image. Bring its already-configured
+# H2 source online immediately instead of waiting for a later poll interval.
+if command -v chronyc >/dev/null 2>&1; then
+    chronyc online "$H2_ROBOT" >/dev/null 2>&1 || true
+    chronyc burst 4/4 "$H2_ROBOT" >/dev/null 2>&1 || true
+fi

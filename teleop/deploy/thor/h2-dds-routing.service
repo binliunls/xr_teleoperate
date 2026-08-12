@@ -1,0 +1,16 @@
+[Unit]
+Description=Route workstation H2 DDS traffic through Thor
+After=NetworkManager.service sharpa-tactile-ips.service chrony.service
+Wants=NetworkManager.service sharpa-tactile-ips.service chrony.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/h2-dds-routing
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=75
+
+[Install]
+WantedBy=multi-user.target

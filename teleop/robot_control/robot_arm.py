@@ -64,6 +64,26 @@ class H1_LowState:
 class H2_LowState:
     def __init__(self):
         self.motor_state = [MotorState() for _ in range(35)]
+        self.timestamps = {}
+
+
+def _h2_lowstate_timestamps(msg, receive_monotonic_ns, receive_realtime_ns):
+    """Preserve real source counters and the workstation DDS read time."""
+    timestamps = {
+        "workstation_receive_monotonic_ns": int(receive_monotonic_ns),
+        "workstation_receive_realtime_ns": int(receive_realtime_ns),
+    }
+    # Unitree's H2 IDL exposes tick but does not document it as a wall-clock
+    # timestamp. Keep it as an opaque counter instead of assigning an epoch.
+    tick = getattr(msg, "tick", None)
+    if tick is not None:
+        timestamps["unitree_tick"] = int(tick)
+    for name in ("sequence", "seq"):
+        sequence = getattr(msg, name, None)
+        if sequence is not None:
+            timestamps["source_sequence"] = int(sequence)
+            break
+    return timestamps
 
 
 class DataBuffer:
@@ -1310,6 +1330,9 @@ class H2_ArmController:
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
         self.ctrl_lock = threading.Lock()
+        self._command_target_generation = 0
+        self._command_target_timestamps = {}
+        self._last_command_publish_timestamps = {}
         self.publish_thread.daemon = True
         self.publish_thread.start()
 
@@ -1319,10 +1342,17 @@ class H2_ArmController:
         while True:
             msg = self.lowstate_subscriber.Read()
             if msg is not None:
+                receive_monotonic_ns = time.monotonic_ns()
+                receive_realtime_ns = time.time_ns()
                 lowstate = H2_LowState()
                 for id in range(35):
                     lowstate.motor_state[id].q = msg.motor_state[id].q
                     lowstate.motor_state[id].dq = msg.motor_state[id].dq
+                lowstate.timestamps = _h2_lowstate_timestamps(
+                    msg,
+                    receive_monotonic_ns,
+                    receive_realtime_ns,
+                )
                 self.lowstate_buffer.SetData(lowstate)
             time.sleep(0.002)
 
@@ -1352,6 +1382,8 @@ class H2_ArmController:
                 arm_q_target = self.q_target
                 arm_tauff_target = self.tauff_target
                 head_q = self.head_q_target.copy()
+                target_generation = self._command_target_generation
+                target_timestamps = dict(self._command_target_timestamps)
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -1372,7 +1404,11 @@ class H2_ArmController:
             self.msg.motor_cmd[H2_JointIndex.kHeadYaw].q = clipped_head_q[1]
 
             self.msg.crc = self.crc.Crc(self.msg)
-            self.lowcmd_publisher.Write(self.msg)
+            self._write_lowcmd_with_timing(
+                self.msg,
+                target_generation=target_generation,
+                target_timestamps=target_timestamps,
+            )
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -1388,6 +1424,38 @@ class H2_ArmController:
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+            self._command_target_generation += 1
+            self._command_target_timestamps = {
+                "target_generation": self._command_target_generation,
+                "workstation_target_set_monotonic_ns": time.monotonic_ns(),
+                "workstation_target_set_realtime_ns": time.time_ns(),
+            }
+
+    def _write_lowcmd_with_timing(self, msg, *, target_generation, target_timestamps):
+        """Write one DDS command and retain its workstation-side timing."""
+        publish_monotonic_ns = time.monotonic_ns()
+        publish_realtime_ns = time.time_ns()
+        if self.lowcmd_publisher.Write(msg) is not True:
+            return False
+        published = dict(target_timestamps)
+        published.update(
+            {
+                "target_generation": int(target_generation),
+                "workstation_publish_monotonic_ns": publish_monotonic_ns,
+                "workstation_publish_realtime_ns": publish_realtime_ns,
+            }
+        )
+        with self.ctrl_lock:
+            self._last_command_publish_timestamps = published
+        return True
+
+    def get_command_timing_snapshot(self):
+        """Return target-set and latest successful DDS publish timestamps."""
+        with self.ctrl_lock:
+            return {
+                "target": dict(self._command_target_timestamps),
+                "last_publish": dict(self._last_command_publish_timestamps),
+            }
 
     def get_mode_machine(self):
         """Return current dds mode machine."""
@@ -1423,6 +1491,18 @@ class H2_ArmController:
         """Return current state dq of waist joints [yaw, roll, pitch] (rad/s)."""
         ms = self.lowstate_buffer.GetData().motor_state
         return np.array([ms[i].dq for i in self.H2_WAIST_INDICES])
+
+    def get_recording_state_snapshot(self):
+        """Return arms, waist and timing from one immutable LowState copy."""
+        lowstate = self.lowstate_buffer.GetData()
+        motor_state = lowstate.motor_state
+        return {
+            "dual_arm_q": np.array([motor_state[id].q for id in H2_JointArmIndex]),
+            "dual_arm_dq": np.array([motor_state[id].dq for id in H2_JointArmIndex]),
+            "waist_q": np.array([motor_state[id].q for id in self.H2_WAIST_INDICES]),
+            "waist_dq": np.array([motor_state[id].dq for id in self.H2_WAIST_INDICES]),
+            "timestamps": dict(lowstate.timestamps),
+        }
 
     def ctrl_dual_arm_go_home(self):
         """Move both the left and right arms of the robot to their home position by setting the target joint angles (q) and torques (tau) to zero."""

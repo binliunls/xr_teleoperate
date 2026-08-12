@@ -38,10 +38,21 @@ even when `--camera-source ros` is selected.
 
 ### Camera repository
 
-The camera publisher and standalone visualizer belong to a separate repository:
+The camera publisher and standalone visualizer belong to a separate private
+repository:
 
 ```text
-https://gitlab-master.nvidia.com/jeleong/sensing_h2_ros_gstreamer.git
+repository: https://github.com/shcSteven/sensing_h2_ros_gstreamer.git
+branch:     haochens/h2-125-camera-dds
+commit:     6a621672dd59441648eba6fb15d67f715cf4358b
+```
+
+An authorized collaborator can reproduce that checkout with:
+
+```bash
+cd ~/Projects_Haochen
+git clone --branch haochens/h2-125-camera-dds \
+  https://github.com/shcSteven/sensing_h2_ros_gstreamer.git
 ```
 
 The workstation teleop process does not import that repository. It constructs

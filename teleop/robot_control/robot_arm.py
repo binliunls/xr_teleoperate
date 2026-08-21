@@ -1260,6 +1260,18 @@ class H2_ArmController:
         self.lowstate_subscriber = ChannelSubscriber(kTopicLowState, hg_LowState)
         self.lowstate_subscriber.Init()
         self.lowstate_buffer = DataBuffer()
+        # clip_arm_q_target derives every command from the newest measured
+        # position, so a stalled lowstate silently pins the arms in place.
+        # Track arrival times to make that visible instead of guessing.
+        self._last_lowstate_time = 0.0
+        self._last_stale_warn_time = 0.0
+        # The rate limiter advances by velocity_limit * control_dt per tick and
+        # assumes the loop really runs at 1/control_dt. If the GIL starves it the
+        # arms crawl instead of tracking, so measure the achieved rate.
+        self._tick_count = 0
+        self._tick_window_start = 0.0
+        self._last_rate_warn_time = 0.0
+        self._achieved_hz = 0.0
 
         # initialize subscribe thread
         self.subscribe_thread = threading.Thread(target=self._subscribe_motor_state)
@@ -1324,7 +1336,14 @@ class H2_ArmController:
                     lowstate.motor_state[id].q = msg.motor_state[id].q
                     lowstate.motor_state[id].dq = msg.motor_state[id].dq
                 self.lowstate_buffer.SetData(lowstate)
+                self._last_lowstate_time = time.monotonic()
             time.sleep(0.002)
+
+    def lowstate_age(self):
+        """Seconds since the last rt/lowstate sample, or inf if none arrived."""
+        if self._last_lowstate_time == 0.0:
+            return float("inf")
+        return time.monotonic() - self._last_lowstate_time
 
     def clip_arm_q_target(self, target_q, velocity_limit):
         current_q = self.get_current_dual_arm_q()
@@ -1373,6 +1392,31 @@ class H2_ArmController:
 
             self.msg.crc = self.crc.Crc(self.msg)
             self.lowcmd_publisher.Write(self.msg)
+
+            age = self.lowstate_age()
+            if age > 0.05 and start_time - self._last_stale_warn_time > 1.0:
+                self._last_stale_warn_time = start_time
+                logger_mp.warning(
+                    f"[H2_ArmController] lowstate stale for {age * 1000:.0f} ms; "
+                    f"arm commands are frozen at the last measured position"
+                )
+
+            self._tick_count += 1
+            if self._tick_window_start == 0.0:
+                self._tick_window_start = start_time
+            elif start_time - self._tick_window_start >= 1.0:
+                achieved_hz = self._tick_count / (start_time - self._tick_window_start)
+                self._achieved_hz = achieved_hz
+                nominal_hz = 1.0 / self.control_dt
+                if achieved_hz < 0.8 * nominal_hz and start_time - self._last_rate_warn_time > 1.0:
+                    self._last_rate_warn_time = start_time
+                    logger_mp.warning(
+                        f"[H2_ArmController] control loop at {achieved_hz:.0f} Hz "
+                        f"(expected {nominal_hz:.0f} Hz); arms move "
+                        f"{nominal_hz / max(achieved_hz, 1.0):.1f}x slower than commanded"
+                    )
+                self._tick_count = 0
+                self._tick_window_start = start_time
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -1424,22 +1468,72 @@ class H2_ArmController:
         ms = self.lowstate_buffer.GetData().motor_state
         return np.array([ms[i].dq for i in self.H2_WAIST_INDICES])
 
-    def ctrl_dual_arm_go_home(self):
-        """Move both the left and right arms of the robot to their home position by setting the target joint angles (q) and torques (tau) to zero."""
+    def ctrl_dual_arm_go_home(self, timeout=8.0, tolerance=0.05,
+                              settle_eps=0.002, settle_samples=10):
+        """Command both arms to the home position and wait until they stop there.
+
+        The gravity-loaded joints (shoulder pitch, elbow, wrist pitch) settle a
+        few hundredths of a rad short of the commanded angle, so `tolerance`
+        alone can be physically unreachable -- waiting on it burns the whole
+        timeout on every call and reports nothing. Treat "stopped moving" as
+        converged as well, and say what is left over when neither happens.
+
+        Returns True if the arms reached or settled at home, False on timeout.
+        """
         logger_mp.info("[H2_ArmController] ctrl_dual_arm_go_home start...")
-        max_attempts = 100
         with self.ctrl_lock:
             self.q_target = np.zeros(14)
             self.head_q_target = np.array([self.head_pitch_home, 0.0])
-        current_attempts = 0
-        tolerance = 0.05
-        while current_attempts < max_attempts:
-            current_q = self.get_current_dual_arm_q()
-            if np.all(np.abs(current_q) < tolerance):
-                logger_mp.info("[H2_ArmController] both arms have reached the home position.")
-                break
-            current_attempts += 1
+
+        deadline = time.time() + timeout
+        prev_q = self.get_current_dual_arm_q()
+        still = 0
+        while time.time() < deadline:
             time.sleep(0.05)
+            current_q = self.get_current_dual_arm_q()
+            residual = float(np.max(np.abs(current_q)))
+
+            if residual < tolerance:
+                logger_mp.info(
+                    f"[H2_ArmController] both arms have reached the home position "
+                    f"(residual {residual:.4f} rad)."
+                )
+                return True
+
+            # A frozen lowstate also looks perfectly still, so do not let it
+            # masquerade as a settled arm.
+            moved = float(np.max(np.abs(current_q - prev_q)))
+            if moved < settle_eps and self.lowstate_age() < 0.05:
+                still += 1
+                if still >= settle_samples:
+                    # Gravity droop is a few hundredths of a rad. Anything much
+                    # larger means something is holding the arm, not that it
+                    # arrived, so do not let it pass as a routine INFO line.
+                    if residual > 0.2:
+                        worst = int(np.argmax(np.abs(current_q)))
+                        logger_mp.warning(
+                            f"[H2_ArmController] arms stopped {residual:.4f} rad "
+                            f"short of home (worst "
+                            f"{list(H2_JointArmIndex)[worst].name}); far more than "
+                            f"gravity droop -- is something blocking the arm?"
+                        )
+                    else:
+                        logger_mp.info(
+                            f"[H2_ArmController] arms settled {residual:.4f} rad short "
+                            f"of home and stopped moving; treating as home."
+                        )
+                    return True
+            else:
+                still = 0
+            prev_q = current_q
+
+        worst = int(np.argmax(np.abs(current_q)))
+        logger_mp.error(
+            f"[H2_ArmController] go_home timed out after {timeout:.1f}s: still "
+            f"{residual:.4f} rad from home, worst joint "
+            f"{list(H2_JointArmIndex)[worst].name} at {current_q[worst]:+.4f} rad"
+        )
+        return False
 
     def speed_gradual_max(self, t=5.0):
         self._gradual_start_time = time.time()

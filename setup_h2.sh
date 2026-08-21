@@ -33,7 +33,7 @@ SDK2_ROOT="${SDK2_ROOT:-$WORKSPACE_ROOT/unitree_sdk2_python}"
 GROOT_ROOT="${GROOT_ROOT:-$WORKSPACE_ROOT/Isaac-GR00T}"
 GROOT_REPO="${GROOT_REPO:-https://github.com/NVIDIA/Isaac-GR00T.git}"
 GROOT_VERSION="${GROOT_VERSION:-n1.7-release}"
-THOR_SETUP_SCRIPT="${THOR_SETUP_SCRIPT:-$WORKSPACE_ROOT/setup_h2_thor.sh}"
+THOR_SETUP_SCRIPT="${THOR_SETUP_SCRIPT:-$XR_ROOT/setup_h2_thor.sh}"
 
 XR_ENV="${XR_ENV:-tv}"
 
@@ -363,10 +363,17 @@ make_cert() {
 
     local out="$HOME/.config/xr_teleoperate"
     mkdir -p "$out"
+    # The XR headset browser is Chromium-based, which refuses a server
+    # certificate that claims CA:TRUE or omits the serverAuth usage -- and it
+    # refuses it without offering the "proceed anyway" interstitial, so the
+    # page just comes up blank. Pin the leaf-certificate extensions.
     openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
         -keyout "$out/key.pem" -out "$out/cert.pem" \
         -subj "/CN=$host_ip" \
-        -addext "subjectAltName=IP:$host_ip,DNS:localhost"
+        -addext "subjectAltName=IP:$host_ip,IP:127.0.0.1,DNS:localhost" \
+        -addext "basicConstraints=critical,CA:FALSE" \
+        -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+        -addext "extendedKeyUsage=serverAuth"
     chmod 600 "$out/key.pem"
     info "Certificate written to $out; it must still be trusted manually on the first XR browser visit."
 }

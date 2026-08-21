@@ -32,7 +32,9 @@ SHARPA_BRIDGE_DIR="${SHARPA_BRIDGE_DIR:-$HOME/Sharpa/bridge_dds}"
 SHARPA_SDK_ROOT="${SHARPA_SDK_ROOT:-/opt/sharpa-wave-sdk}"
 SHARPA_INCLUDE_DIR="${SHARPA_INCLUDE_DIR:-$SHARPA_SDK_ROOT/include}"
 SHARPA_LIB_DIR="${SHARPA_LIB_DIR:-$SHARPA_SDK_ROOT/lib}"
-SHARPA_ARM_URL="${SHARPA_ARM_URL:-https://github.com/sharpa-robotics/sharpa-wave-sdk/releases/download/v5.0.3/SharpaWaveSDK_5.0.1_arm.zip}"
+SHARPA_SDK_VERSION="5.0.4"
+SHARPA_ARM_URL="https://github.com/sharpa-robotics/sharpa-wave-sdk/releases/download/v5.0.4/SharpaWaveSDK_5.0.4_arm.zip"
+SHARPA_ARM_SHA256="ea2a1ebd3d0a466449236220fd5c2101eb33efddff207a971f651d4d853c94a9"
 
 LEFT_HAND_IP="${LEFT_HAND_IP:-192.168.124.10}"
 RIGHT_HAND_IP="${RIGHT_HAND_IP:-192.168.124.20}"
@@ -76,7 +78,7 @@ Optional: migrate proprietary vendor components from an existing Thor
 First-time installation (run each step manually)
   install           Install build tools and prepare the official unitree_sdk2
   camera-install    Initialize S56x/SHF3L and install the native DDS image environment
-  sharpa-install    Install the official Sharpa Wave SDK 5.0.1 ARM64 release
+  sharpa-install    Install the official Sharpa Wave SDK 5.0.4 ARM64 release
   bridge-build      Build and install the Sharpa DDS bridge
 
 Every cold start (use separate terminals)
@@ -94,7 +96,7 @@ Common path overrides:
 Notes:
   - Camera scripts are deployed by thor-sync from the workstation; vendor drivers/device trees must already exist on Thor.
   - Images use isolated CycloneDDS domain 10 and do not depend on ROS 2 or Unitree SDK2.
-  - The Sharpa ARM64 SDK uses the 5.0.1 ARM zip from the official v5.0.3 release.
+  - The Sharpa ARM64 SDK uses the 5.0.4 ARM zip from the official v5.0.4 release.
   - This script does not control the H2 body, stand the robot, or run a policy.
   - No all/run-everything command is provided; run each next step manually only after its checks pass.
 EOF
@@ -378,15 +380,19 @@ sharpa_install() {
     need_cmd curl
     need_cmd unzip
     need_cmd file
+    need_cmd sha256sum
     need_cmd sudo
 
     CLEANUP_DIR="$(mktemp -d)"
-    local archive="$CLEANUP_DIR/SharpaWaveSDK_5.0.1_arm.zip"
+    local archive="$CLEANUP_DIR/SharpaWaveSDK_${SHARPA_SDK_VERSION}_arm.zip"
     local unpack="$CLEANUP_DIR/unpack"
     mkdir -p "$unpack"
 
-    info "Downloading SDK 5.0.1 ARM64 from the official Sharpa release"
+    info "Downloading SDK $SHARPA_SDK_VERSION ARM64 from the official Sharpa release"
     curl --fail --location --show-error "$SHARPA_ARM_URL" --output "$archive"
+    printf '%s  %s\n' "$SHARPA_ARM_SHA256" "$archive" |
+        sha256sum --check --status ||
+        die "Sharpa SDK archive checksum verification failed"
     unzip -q "$archive" -d "$unpack"
 
     local source_root=""
@@ -404,9 +410,9 @@ sharpa_install() {
         die "The official archive is missing include/SharpaWaveSDK.h or lib/libsharpa-wave-sdk.so"
     file "$source_root/lib/libsharpa-wave-sdk.so" | grep -Eq 'ARM aarch64|ARM64' ||
         die "The shared library in the archive is not aarch64: $(file "$source_root/lib/libsharpa-wave-sdk.so")"
-    grep -Eq 'SHARPA_SDK_VERSION[[:space:]]+\"5\.0\.[01]\"' \
+    grep -Fq "#define SHARPA_SDK_VERSION \"$SHARPA_SDK_VERSION\"" \
         "$source_root/include/SharpaWaveSDK.h" ||
-        die "The Sharpa header is not from the SDK 5.0.x required by the bridge"
+        die "The Sharpa header is not SDK $SHARPA_SDK_VERSION"
 
     info "Installing to $SHARPA_SDK_ROOT"
     sudo mkdir -p "$SHARPA_SDK_ROOT"

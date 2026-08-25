@@ -43,7 +43,7 @@ DDS_DOMAIN="${DDS_DOMAIN:-0}"
 CAMERA_DDS_DOMAIN="${CAMERA_DDS_DOMAIN:-10}"
 NETWORK_INTERFACE="${NETWORK_INTERFACE:-}"
 
-SHARPA_RETARGET_DIR="${SHARPA_RETARGET_DIR:-$WORKSPACE_ROOT/Sharpa/sharpa-manus-sdk/retargeting_alg_release_V4.0}"
+SHARPA_RETARGET_DIR="${SHARPA_RETARGET_DIR:-$WORKSPACE_ROOT/sharpa-teleop/workstation/sharpa-manus-sdk-1.1.0/retargeting_alg_release_V5.0}"
 MANUS_ROOT="${MANUS_ROOT:-$WORKSPACE_ROOT/Sharpa/sharpa-manus-sdk}"
 MANUS_CLIENT_DIR="${MANUS_CLIENT_DIR:-$MANUS_ROOT/client}"
 MANUS_SDK_VERSION="${MANUS_SDK_VERSION:-3.1.1}"
@@ -249,7 +249,7 @@ manus_install() {
     need_dir "$MANUS_CLIENT_DIR"
     need_file "$MANUS_CLIENT_DIR/Makefile"
     need_file "$MANUS_CLIENT_DIR/SharpaManusClient.cpp"
-    need_file "$SHARPA_RETARGET_DIR/retargeting_manus_demo_multiprocess.py"
+    need_file "$SHARPA_RETARGET_DIR/retargeting_manus_demo_dds.py"
 
     local sdk_dir="$MANUS_CLIENT_DIR/ManusSDK"
     if [[ -f "$sdk_dir/include/ManusSDK.h" &&
@@ -282,7 +282,7 @@ manus_install() {
         ldd "$MANUS_CLIENT_DIR/SharpaManusClient.out" >&2
         die "The MANUS client has missing shared-library dependencies"
     fi
-    xr_run python "$SHARPA_RETARGET_DIR/retargeting_manus_demo_multiprocess.py" --help >/dev/null
+    xr_run python "$SHARPA_RETARGET_DIR/retargeting_manus_demo_dds.py" --help >/dev/null
     info "MANUS SDK/client installed; insert the Sensor Dongle and an SDK(integrated)-enabled License Key, then run manus-start"
 }
 
@@ -449,10 +449,10 @@ doctor() {
     else
         check_fail "MANUS SDK/client installation is incomplete (run manus-install)"
     fi
-    if xr_run python "$SHARPA_RETARGET_DIR/retargeting_manus_demo_multiprocess.py" --help >/dev/null 2>&1; then
-        check_ok "MANUS retargeting Python environment"
+    if xr_run python "$SHARPA_RETARGET_DIR/retargeting_manus_demo_dds.py" --help >/dev/null 2>&1; then
+        check_ok "MANUS retargeting V5.0 Python environment"
     else
-        check_fail "MANUS retargeting dependencies failed validation (run manus-install)"
+        check_fail "MANUS retargeting V5.0 dependencies failed validation (run manus-install)"
     fi
     if command -v nvidia-smi >/dev/null 2>&1; then
         check_ok "NVIDIA tools available"
@@ -523,15 +523,18 @@ PY
 }
 
 hand_retarget() {
-    # This package does not include a separate retargeting_manus_demo_dds.py.
-    # DDS publishing is enabled by the -dds option in retargeting_manus_demo_multiprocess.py.
-    need_file "$SHARPA_RETARGET_DIR/retargeting_manus_demo_multiprocess.py"
-    local dds_args=(-dds -dds_domain "$DDS_DOMAIN")
-    [[ -n "$NETWORK_INTERFACE" ]] && dds_args+=(-dds_iface "$NETWORK_INTERFACE")
+    # V5.0 has a dedicated DDS entrypoint. Haptics/tactile collection is opt-in,
+    # so this command deliberately omits --haptics and every --haptic-* option.
+    need_file "$SHARPA_RETARGET_DIR/retargeting_manus_demo_dds.py"
+    local dds_args=(
+        --dds
+        --side both
+        --mocap-address tcp://localhost:2044
+        --dds-domain "$DDS_DOMAIN"
+    )
+    [[ -n "$NETWORK_INTERFACE" ]] && dds_args+=(--dds-interface "$NETWORK_INTERFACE")
     (cd "$SHARPA_RETARGET_DIR" &&
-        xr_run python retargeting_manus_demo_multiprocess.py \
-            -mocap_address tcp://localhost:2044 \
-            "${dds_args[@]}" "$@")
+        xr_run python retargeting_manus_demo_dds.py "${dds_args[@]}" "$@")
 }
 
 main() {

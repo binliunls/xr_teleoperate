@@ -249,7 +249,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--head-pitch-home",
         type=float,
-        default=0.6,
+        default=0.7,
         metavar="RAD",
         help="H2 head pitch at home/rest position in radians (default: 0.3, looking slightly down). "
         "Range: -0.523 (up) to 0.837 (down).",

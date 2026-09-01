@@ -103,12 +103,6 @@ def _compute_relative_target_pose(current_pose, ref_pose, init_pose):
     return target
 
 
-def _rotation_delta_deg(current_rot, previous_rot):
-    relative_rot = np.asarray(current_rot) @ np.asarray(previous_rot).T
-    cosine = np.clip((np.trace(relative_rot) - 1.0) / 2.0, -1.0, 1.0)
-    return float(np.degrees(np.arccos(cosine)))
-
-
 def _get_ik_translation_scale(arm_ik) -> float:
     human_arm_length = getattr(arm_ik, "human_arm_length", None)
     robot_arm_length = getattr(arm_ik, "robot_arm_length", None)
@@ -645,10 +639,6 @@ if __name__ == "__main__":
         # Buffer for t+1 action labeling: action[t] = state[t+1]
         _sharpa_ee_prev = None  # (left_list, right_list) from previous step
         prev_y_button = False  # for edge detection on Y button
-        last_tracking_diag_time = 0.0
-        last_controller_event_count = 0
-        last_diag_left_pose = None
-        last_diag_right_pose = None
 
         # main loop. robot start to follow VR user's motion
         while not STOP:
@@ -762,76 +752,6 @@ if __name__ == "__main__":
             time_ik_end = time.time()
             logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
             arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
-            if time_ik_end - last_tracking_diag_time >= 1.0:
-                diag_elapsed = (
-                    time_ik_end - last_tracking_diag_time
-                    if last_tracking_diag_time > 0.0
-                    else 1.0
-                )
-                last_tracking_diag_time = time_ik_end
-                current_left_pose = np.asarray(tele_data.left_wrist_pose).copy()
-                current_right_pose = np.asarray(tele_data.right_wrist_pose).copy()
-                left_input_delta = np.linalg.norm(
-                    current_left_pose[:3, 3] - REF_LEFT_WRIST_POSE[:3, 3]
-                )
-                right_input_delta = np.linalg.norm(
-                    current_right_pose[:3, 3] - REF_RIGHT_WRIST_POSE[:3, 3]
-                )
-                if last_diag_left_pose is None:
-                    left_step = right_step = 0.0
-                    left_rotation_step = right_rotation_step = 0.0
-                else:
-                    left_step = np.linalg.norm(
-                        current_left_pose[:3, 3] - last_diag_left_pose[:3, 3]
-                    )
-                    right_step = np.linalg.norm(
-                        current_right_pose[:3, 3] - last_diag_right_pose[:3, 3]
-                    )
-                    left_rotation_step = _rotation_delta_deg(
-                        current_left_pose[:3, :3], last_diag_left_pose[:3, :3]
-                    )
-                    right_rotation_step = _rotation_delta_deg(
-                        current_right_pose[:3, :3], last_diag_right_pose[:3, :3]
-                    )
-                last_diag_left_pose = current_left_pose
-                last_diag_right_pose = current_right_pose
-
-                tvuer = tv_wrapper.tvuer
-                controller_event_count = getattr(tvuer, "controller_event_count", 0)
-                controller_event_hz = max(
-                    0.0,
-                    (controller_event_count - last_controller_event_count) / diag_elapsed,
-                )
-                last_controller_event_count = controller_event_count
-                controller_event_age_ms = (
-                    getattr(tvuer, "controller_event_age", float("inf")) * 1000.0
-                )
-                controller_success_age_ms = (
-                    getattr(tvuer, "controller_success_age", float("inf")) * 1000.0
-                )
-                controller_parse_errors = getattr(
-                    tvuer, "controller_parse_error_count", 0
-                )
-                command_delta = np.max(np.abs(np.asarray(sol_q) - current_lr_arm_q))
-                measured_speed = np.max(np.abs(current_lr_arm_dq))
-                logger_mp.info(
-                    "[tracking] controller_delta=(L %.3f, R %.3f) m, "
-                    "pose_step=(L %.3f m/%.1f deg, R %.3f m/%.1f deg), "
-                    "events=%.1f Hz, event_age=%.0f ms, success_age=%.0f ms, "
-                    "parse_errors=%d, command_delta=%.3f rad, measured_speed=%.3f rad/s",
-                    left_input_delta,
-                    right_input_delta,
-                    left_step,
-                    left_rotation_step,
-                    right_step,
-                    right_rotation_step,
-                    controller_event_hz,
-                    controller_event_age_ms,
-                    controller_success_age_ms,
-                    controller_parse_errors,
-                    command_delta,
-                    measured_speed,
-                )
 
             # record data
             if args.record:

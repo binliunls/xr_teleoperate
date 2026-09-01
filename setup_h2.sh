@@ -27,12 +27,28 @@ else
 fi
 
 # ----------------------------- User configuration ----------------------------
+# Each repository has a <NAME>_ROOT checkout path, a <NAME>_REPO URL, and a
+# <NAME>_VERSION ref. Third-party repositories are pinned to the exact commit
+# this setup was validated against; our own forks track a branch so that
+# ongoing work can be pulled without editing this script. The two forks are
+# private, so they use SSH and need a GitHub key on the workstation.
 XR_ROOT="${XR_ROOT:-$DEFAULT_XR_ROOT}"
-LEROBOT_ROOT="${LEROBOT_ROOT:-$WORKSPACE_ROOT/unitree_lerobot}"
+XR_REPO="${XR_REPO:-git@github.com:mingxueg-nv/xr_teleoperate.git}"
+XR_VERSION="${XR_VERSION:-mingxueg/change_camera_streams_on_dds}"
+
+UNITREE_LEROBOT_ROOT="${UNITREE_LEROBOT_ROOT:-$WORKSPACE_ROOT/unitree_lerobot}"
+UNITREE_LEROBOT_REPO="${UNITREE_LEROBOT_REPO:-git@github.com:mingxueg-nv/unitree_lerobot.git}"
+UNITREE_LEROBOT_VERSION="${UNITREE_LEROBOT_VERSION:-mingxueg/dds_deploy}"
+
 SDK2_ROOT="${SDK2_ROOT:-$WORKSPACE_ROOT/unitree_sdk2_python}"
+SDK2_REPO="${SDK2_REPO:-https://github.com/unitreerobotics/unitree_sdk2_python.git}"
+SDK2_VERSION="${SDK2_VERSION:-e4cd91f051aaa77a70600e3d2bf7f50889db1980}"
+
 GROOT_ROOT="${GROOT_ROOT:-$WORKSPACE_ROOT/Isaac-GR00T}"
 GROOT_REPO="${GROOT_REPO:-https://github.com/NVIDIA/Isaac-GR00T.git}"
-GROOT_VERSION="${GROOT_VERSION:-n1.7-release}"
+# The commit this workstation trains and serves with. It is a few commits past
+# the n1.7-release tag, which is what the models here were built against.
+GROOT_VERSION="${GROOT_VERSION:-ab88b50c718f6528e1df9dcbaf75865d1b604760}"
 THOR_SETUP_SCRIPT="${THOR_SETUP_SCRIPT:-$XR_ROOT/setup_h2_thor.sh}"
 
 XR_ENV="${XR_ENV:-tv}"
@@ -43,9 +59,16 @@ DDS_DOMAIN="${DDS_DOMAIN:-0}"
 CAMERA_DDS_DOMAIN="${CAMERA_DDS_DOMAIN:-10}"
 NETWORK_INTERFACE="${NETWORK_INTERFACE:-}"
 
-SHARPA_RETARGET_DIR="${SHARPA_RETARGET_DIR:-$WORKSPACE_ROOT/sharpa-teleop/workstation/sharpa-manus-sdk-1.1.0/retargeting_alg_release_V5.0}"
+SHARPA_TELEOP_ROOT="${SHARPA_TELEOP_ROOT:-$WORKSPACE_ROOT/sharpa-teleop}"
+SHARPA_TELEOP_REPO="${SHARPA_TELEOP_REPO:-https://github.com/isaac-for-healthcare/sharpa-teleop.git}"
+SHARPA_TELEOP_VERSION="${SHARPA_TELEOP_VERSION:-ce5a2635f7d3ad84041d279868f009e9ceeba6c3}"
+SHARPA_RETARGET_DIR="${SHARPA_RETARGET_DIR:-$SHARPA_TELEOP_ROOT/workstation/sharpa-manus-sdk-1.1.0/retargeting_alg_release_V5.0}"
+
 MANUS_ROOT="${MANUS_ROOT:-$WORKSPACE_ROOT/Sharpa/sharpa-manus-sdk}"
+MANUS_REPO="${MANUS_REPO:-https://github.com/sharpa-robotics/sharpa-manus-sdk.git}"
+MANUS_REPO_VERSION="${MANUS_REPO_VERSION:-b87bff567c82905dd591d91f08be59fb90a604df}"
 MANUS_CLIENT_DIR="${MANUS_CLIENT_DIR:-$MANUS_ROOT/client}"
+# Official MANUS Core SDK archive; unrelated to the sharpa-manus-sdk git pin above.
 MANUS_SDK_VERSION="${MANUS_SDK_VERSION:-3.1.1}"
 MANUS_SDK_URL="${MANUS_SDK_URL:-https://static.manus-meta.com/resources/manus_core_3/sdk/MANUS_Core_${MANUS_SDK_VERSION}_SDK.zip}"
 
@@ -67,6 +90,7 @@ Usage:
 Configuration and installation
   workflow                         Print manual and automated steps from setup through deployment
   config                           Show current robot, network, and directory configuration
+  repos                            Clone the core repositories at their pinned versions (GR00T: install-groot)
   install                          Build tv; install XR/SDK2/LeRobot packages and MANUS SDK/client
   install-groot                    Install the Isaac-GR00T uv/CUDA Python environment
   manus-install                    Install the official MANUS Integrated SDK and build the acquisition client
@@ -87,7 +111,10 @@ Collection, training, and deployment
 
 Common overrides:
   THOR_IP=192.168.123.163 DDS_DOMAIN=0 CAMERA_DDS_DOMAIN=10 NETWORK_INTERFACE=enp3s0
-  XR_ROOT=... LEROBOT_ROOT=... GROOT_ROOT=... GROOT_VERSION=n1.7-release
+  Checkout paths : XR_ROOT, UNITREE_LEROBOT_ROOT, SDK2_ROOT, SHARPA_TELEOP_ROOT, MANUS_ROOT, GROOT_ROOT
+  Clone sources  : XR_REPO, UNITREE_LEROBOT_REPO, SDK2_REPO, SHARPA_TELEOP_REPO, MANUS_REPO, GROOT_REPO
+  Pinned versions: XR_VERSION, UNITREE_LEROBOT_VERSION, SDK2_VERSION, SHARPA_TELEOP_VERSION,
+                   MANUS_REPO_VERSION, GROOT_VERSION, MANUS_SDK_VERSION
 
 EOF
 }
@@ -96,13 +123,153 @@ need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 need_dir() { [[ -d "$1" ]] || die "Directory does not exist: $1"; }
 need_file() { [[ -f "$1" ]] || die "File does not exist: $1"; }
 
+# ensure_repo <label> <checkout-dir> <url> <ref>
+#
+# Clones <url> at <ref> when the directory is missing, and sets REPO_WAS_CLONED
+# so callers can run first-time-only fixups. An existing checkout is reported
+# but never touched: these trees carry hand-applied source fixes, glove
+# calibration bound to the physical hardware, and submodules that intentionally
+# run ahead of the recorded gitlinks, so forcing them onto a pinned ref would
+# break a working install.
+REPO_WAS_CLONED=0
+ensure_repo() {
+    local label="$1" dir="$2" url="$3" ref="$4"
+    REPO_WAS_CLONED=0
+    need_cmd git
+
+    if [[ ! -d "$dir" ]]; then
+        info "Cloning $label into $dir at $ref"
+        mkdir -p "$(dirname "$dir")"
+        git clone "$url" "$dir" || die "Could not clone $label from $url"
+        git -C "$dir" checkout --quiet "$ref" ||
+            die "Cloned $label but could not check out '$ref'"
+        REPO_WAS_CLONED=1
+        info "$label is now at $(git -C "$dir" rev-parse --short HEAD)"
+        return
+    fi
+
+    git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 ||
+        die "$dir exists but is not a git checkout; move it aside or point the matching *_ROOT elsewhere"
+
+    local head branch dirty=""
+    head="$(git -C "$dir" rev-parse --short HEAD)"
+    branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD)"
+    [[ -n "$(git -C "$dir" status --porcelain)" ]] && dirty=" with local changes"
+    info "$label already present at $branch@$head$dirty"
+
+    # Compare against the pin only when the ref already resolves locally, so an
+    # offline install does not need a fetch to get past this check.
+    local want
+    if want="$(git -C "$dir" rev-parse --verify --quiet "$ref^{commit}")"; then
+        [[ "$want" == "$(git -C "$dir" rev-parse HEAD)" ]] ||
+            warn "$label is not on the pinned ref $ref; keeping the current checkout"
+    fi
+}
+
+# Populates xr_teleoperate submodules by path, and only when the directory is
+# empty. A blanket `git submodule update` would check out the recorded gitlink,
+# which on an established workstation silently rolls teleimager back to an
+# older commit than the one actually installed into the environment.
+ensure_xr_submodules() {
+    git -C "$XR_ROOT" rev-parse --git-dir >/dev/null 2>&1 || {
+        warn "$XR_ROOT is not a git checkout; skipping submodule initialization"
+        return
+    }
+    local path
+    while read -r path; do
+        [[ -n "$path" ]] || continue
+        if [[ -n "$(ls -A "$XR_ROOT/$path" 2>/dev/null)" ]]; then
+            info "Submodule already populated: $path"
+            continue
+        fi
+        info "Initializing submodule $path"
+        git -C "$XR_ROOT" submodule update --init --recursive -- "$path" ||
+            die "Could not initialize submodule $path"
+    done < <(git -C "$XR_ROOT" config --file .gitmodules \
+                 --get-regexp '^submodule\..*\.path$' 2>/dev/null | awk '{print $2}' || true)
+}
+
+# The MANUS client links against system ncurses/zmq and includes Eigen, none of
+# which ship with the repository.
+check_build_deps() {
+    local missing=()
+    [[ -f /usr/include/ncurses.h || -f /usr/include/curses.h ]] || missing+=(libncurses-dev)
+    [[ -f /usr/include/zmq.h ]] || missing+=(libzmq3-dev)
+    [[ -f /usr/include/eigen3/Eigen/Core ]] || missing+=(libeigen3-dev)
+    if (( ${#missing[@]} > 0 )); then
+        die "Missing development packages: ${missing[*]}
+Install them first: sudo apt-get install -y ${missing[*]}"
+    fi
+}
+
+ensure_all_repos() {
+    if [[ "$XR_ROOT" == "$SCRIPT_DIR" ]]; then
+        info "xr_teleoperate is the checkout this script runs from: $XR_ROOT"
+    else
+        ensure_repo xr_teleoperate "$XR_ROOT" "$XR_REPO" "$XR_VERSION"
+    fi
+    ensure_xr_submodules
+    ensure_repo unitree_lerobot "$UNITREE_LEROBOT_ROOT" "$UNITREE_LEROBOT_REPO" "$UNITREE_LEROBOT_VERSION"
+    ensure_repo unitree_sdk2_python "$SDK2_ROOT" "$SDK2_REPO" "$SDK2_VERSION"
+    ensure_repo sharpa-teleop "$SHARPA_TELEOP_ROOT" "$SHARPA_TELEOP_REPO" "$SHARPA_TELEOP_VERSION"
+    ensure_repo sharpa-manus-sdk "$MANUS_ROOT" "$MANUS_REPO" "$MANUS_REPO_VERSION"
+    manus_apply_local_fixes "$REPO_WAS_CLONED"
+    need_dir "$SHARPA_RETARGET_DIR"
+}
+
+# Two fixes that upstream sharpa-manus-sdk still needs for the H2 + Sharpa
+# setup. Each is guarded by a content check, so re-running is a no-op and a
+# checkout that already carries the fix by hand is left alone.
+manus_apply_local_fixes() {
+    local fresh_clone="${1:-0}"
+    local client_cpp="$MANUS_CLIENT_DIR/SharpaManusClient.cpp"
+    local makefile="$MANUS_CLIENT_DIR/Makefile"
+    need_file "$client_cpp"
+    need_file "$makefile"
+
+    # Upstream rotates the four pinky nodes into the thumb slots, which shifts
+    # every finger by one -- index motion ends up driving the Sharpa middle
+    # finger and open/close is corrupted. The retargeting order is wrist,
+    # thumb, index, middle, ring, pinky, i.e. the identity permutation.
+    local rotated='reorderedIndices = {0, 21, 22, 23, 24, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};'
+    local identity='reorderedIndices = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24};'
+    if grep -qF -- "$identity" "$client_cpp"; then
+        info "Finger order is already correct in SharpaManusClient.cpp"
+    elif grep -qF -- "$rotated" "$client_cpp"; then
+        info "Applying the finger-order fix to SharpaManusClient.cpp"
+        sed -i "s|$rotated|$identity|" "$client_cpp"
+        grep -qF -- "$identity" "$client_cpp" || die "The finger-order fix did not apply"
+    else
+        warn "No known reorderedIndices line in $client_cpp; verify the finger order by hand"
+    fi
+
+    # Upstream bakes in a relative rpath, so the client only resolves
+    # libManusSDK_Integrated.so when it is started from client/. Anchor the
+    # lookup to the binary instead.
+    local rpath_old='-Wl,-rpath=./ManusSDK/lib'
+    local rpath_new="-Wl,-rpath='\$\$ORIGIN/ManusSDK/lib'"
+    if grep -qF -- "$rpath_new" "$makefile"; then
+        info 'Makefile rpath is already anchored to $ORIGIN'
+    elif grep -qF -- "$rpath_old" "$makefile"; then
+        info 'Anchoring the Makefile rpath to $ORIGIN'
+        sed -i "s|$rpath_old|$rpath_new|" "$makefile"
+        grep -qF -- "$rpath_new" "$makefile" || die "The rpath fix did not apply"
+    else
+        warn "No known rpath in $makefile; verify it by hand"
+    fi
+
+    if [[ "$fresh_clone" == "1" ]]; then
+        warn "Fresh sharpa-manus-sdk clone: the Calibration_left.mcal/Calibration_right.mcal files are upstream defaults, not this workstation's gloves. Recalibrate both gloves in client/CalibrationGUI before collecting data."
+    fi
+}
+
 conda_env_exists() {
     conda env list | awk '{print $1}' | grep -Fxq "$1"
 }
 
 xr_run() {
     conda run --no-capture-output -n "$XR_ENV" \
-        env "PYTHONPATH=$XR_ROOT:$LEROBOT_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$@"
+        env "PYTHONPATH=$XR_ROOT:$UNITREE_LEROBOT_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$@"
 }
 
 print_config() {
@@ -116,11 +283,14 @@ DDS domain      : $DDS_DOMAIN
 Camera DDS      : $CAMERA_DDS_DOMAIN (isolated from robot/hands)
 Network interface: ${NETWORK_INTERFACE:-<auto-select>}
 
-XR repository   : $XR_ROOT
-LeRobot repository: $LEROBOT_ROOT
-SDK2 repository : $SDK2_ROOT
-GR00T repository: $GROOT_ROOT
-GR00T version   : $GROOT_VERSION
+Repositories (checkout @ pinned version)
+  xr_teleoperate     : $XR_ROOT @ $XR_VERSION
+  unitree_lerobot    : $UNITREE_LEROBOT_ROOT @ $UNITREE_LEROBOT_VERSION
+  unitree_sdk2_python: $SDK2_ROOT @ $SDK2_VERSION
+  sharpa-teleop      : $SHARPA_TELEOP_ROOT @ $SHARPA_TELEOP_VERSION
+  sharpa-manus-sdk   : $MANUS_ROOT @ $MANUS_REPO_VERSION
+  Isaac-GR00T        : $GROOT_ROOT @ $GROOT_VERSION
+MANUS Core SDK  : $MANUS_SDK_VERSION
 XR conda environment: $XR_ENV
 EOF
 }
@@ -211,19 +381,14 @@ thor_sync() {
 install_all() {
     need_cmd conda
     need_cmd git
-    need_dir "$XR_ROOT"
-    need_dir "$LEROBOT_ROOT"
+    check_build_deps
+    ensure_all_repos
 
     if ! conda_env_exists "$XR_ENV"; then
         info "Creating XR environment $XR_ENV"
         conda create -y -n "$XR_ENV" python=3.10 pinocchio=3.1.0 numpy=1.26.4 -c conda-forge
     fi
     conda install -y -n "$XR_ENV" ffmpeg=7.1.1 -c conda-forge
-
-    if [[ ! -d "$SDK2_ROOT" ]]; then
-        info "Cloning unitree_sdk2_python"
-        git clone https://github.com/unitreerobotics/unitree_sdk2_python.git "$SDK2_ROOT"
-    fi
 
     info "Installing XR, H2 control, and DDS dependencies"
     xr_run python -m pip install -U pip
@@ -232,7 +397,7 @@ install_all() {
     xr_run python -m pip install -e "$XR_ROOT/teleop/robot_control/dex-retargeting"
     xr_run python -m pip install -r "$XR_ROOT/requirements.txt"
     xr_run python -m pip install -e "$SDK2_ROOT"
-    xr_run python -m pip install -e "$LEROBOT_ROOT"
+    xr_run python -m pip install -e "$UNITREE_LEROBOT_ROOT"
     xr_run python -m pip install cyclonedds==0.10.2 msgpack msgpack-numpy pyzmq pyyaml opencv-python
 
     manus_install
@@ -246,19 +411,24 @@ manus_install() {
     need_cmd unzip
     need_cmd make
     need_cmd g++
-    need_dir "$MANUS_CLIENT_DIR"
-    need_file "$MANUS_CLIENT_DIR/Makefile"
-    need_file "$MANUS_CLIENT_DIR/SharpaManusClient.cpp"
+    check_build_deps
+    ensure_repo sharpa-manus-sdk "$MANUS_ROOT" "$MANUS_REPO" "$MANUS_REPO_VERSION"
+    manus_apply_local_fixes "$REPO_WAS_CLONED"
+    ensure_repo sharpa-teleop "$SHARPA_TELEOP_ROOT" "$SHARPA_TELEOP_REPO" "$SHARPA_TELEOP_VERSION"
     need_file "$SHARPA_RETARGET_DIR/retargeting_manus_demo_dds.py"
 
+    # The repository ships its own older ManusSDK copy, so a fresh clone looks
+    # complete even though the client needs Core 3.1.x. CoreSdk_SetLogLocation
+    # was added in 3.1.x, which distinguishes the two without a version macro.
     local sdk_dir="$MANUS_CLIENT_DIR/ManusSDK"
     if [[ -f "$sdk_dir/include/ManusSDK.h" &&
-          -f "$sdk_dir/lib/libManusSDK_Integrated.so" ]]; then
+          -f "$sdk_dir/lib/libManusSDK_Integrated.so" ]] &&
+       grep -q 'CoreSdk_SetLogLocation' "$sdk_dir/include/ManusSDK.h"; then
         info "Reusing the installed MANUS SDK: $sdk_dir"
     else
         local archive
         archive="$(mktemp --suffix=.zip)"
-        info "Downloading MANUS Core SDK $MANUS_SDK_VERSION (approximately 208 MiB)"
+        info "Downloading MANUS Core SDK $MANUS_SDK_VERSION (approximately 208 MiB), replacing any bundled copy"
         curl --fail --location --show-error "$MANUS_SDK_URL" --output "$archive"
         mkdir -p "$sdk_dir/include" "$sdk_dir/lib"
         unzip -jo "$archive" \
@@ -334,10 +504,9 @@ manus_check() {
 
 install_groot() {
     need_cmd git
-    if [[ ! -d "$GROOT_ROOT" ]]; then
-        info "Cloning NVIDIA Isaac-GR00T $GROOT_VERSION"
-        git clone --depth 1 --branch "$GROOT_VERSION" "$GROOT_REPO" "$GROOT_ROOT"
-    fi
+    # Cloned in full rather than --depth 1: the pin is a commit, which a shallow
+    # clone of a single branch cannot check out.
+    ensure_repo Isaac-GR00T "$GROOT_ROOT" "$GROOT_REPO" "$GROOT_VERSION"
     need_file "$GROOT_ROOT/pyproject.toml"
     if ! command -v uv >/dev/null 2>&1; then
         need_cmd conda
@@ -394,15 +563,15 @@ doctor() {
     else
         check_fail "Missing H2 URDF"
     fi
-    if [[ -f "$LEROBOT_ROOT/unitree_lerobot/utils/constants.py" ]]; then
+    if [[ -f "$UNITREE_LEROBOT_ROOT/unitree_lerobot/utils/constants.py" ]]; then
         check_ok "unitree_lerobot"
-        if grep -q '"Unitree_H2_Sharpa"' "$LEROBOT_ROOT/unitree_lerobot/utils/constants.py"; then
+        if grep -q '"Unitree_H2_Sharpa"' "$UNITREE_LEROBOT_ROOT/unitree_lerobot/utils/constants.py"; then
             check_ok "Unitree_H2_Sharpa data configuration"
         else
             check_fail "Missing H2 Sharpa ROBOT_CONFIGS"
         fi
     else
-        check_fail "$LEROBOT_ROOT is incomplete"
+        check_fail "$UNITREE_LEROBOT_ROOT is incomplete"
     fi
 
     if command -v conda >/dev/null 2>&1; then
@@ -544,6 +713,7 @@ main() {
         help|-h|--help) usage ;;
         workflow) workflow ;;
         config) print_config ;;
+        repos) ensure_all_repos ;;
         thor-sync) thor_sync "$@" ;;
         install) install_all "$@" ;;
         install-groot) install_groot "$@" ;;

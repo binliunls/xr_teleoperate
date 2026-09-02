@@ -1246,6 +1246,8 @@ class H2_ArmController:
         kp_wrist=None,
         kd_low=None,
         kd_wrist=None,
+        kp_head=None,
+        kd_head=None,
         head_pitch_home=0.0,
     ):
         logger_mp.info("Initialize H2_ArmController...")
@@ -1259,6 +1261,12 @@ class H2_ArmController:
         self.kd_low = kd_low if kd_low is not None else 10.0
         self.kp_wrist = kp_wrist if kp_wrist is not None else 50.0
         self.kd_wrist = kd_wrist if kd_wrist is not None else 3.0
+        # Head and non-arm weak joints (ankles) are decoupled from kp_low/kd_low
+        # so tuning the arm gains never changes them.
+        self.kp_head = kp_head if kp_head is not None else 150.0
+        self.kd_head = kd_head if kd_head is not None else 10.0
+        self.kp_weak = 150.0
+        self.kd_weak = 10.0
 
         self.all_motor_q = None
         self.arm_velocity_limit = 20.0
@@ -1315,9 +1323,12 @@ class H2_ArmController:
                     self.msg.motor_cmd[id].kp = self.kp_low
                     self.msg.motor_cmd[id].kd = self.kd_low
             else:
-                if self._Is_weak_motor(id):
-                    self.msg.motor_cmd[id].kp = self.kp_low
-                    self.msg.motor_cmd[id].kd = self.kd_low
+                if self._Is_head_motor(id):
+                    self.msg.motor_cmd[id].kp = self.kp_head
+                    self.msg.motor_cmd[id].kd = self.kd_head
+                elif self._Is_weak_motor(id):
+                    self.msg.motor_cmd[id].kp = self.kp_weak
+                    self.msg.motor_cmd[id].kd = self.kd_weak
                 else:
                     self.msg.motor_cmd[id].kp = self.kp_high
                     self.msg.motor_cmd[id].kd = self.kd_high
@@ -1559,6 +1570,13 @@ class H2_ArmController:
             H2_JointIndex.kRightWristYaw.value,
         ]
         return motor_index.value in wrist_motors
+
+    def _Is_head_motor(self, motor_index):
+        head_motors = [
+            H2_JointIndex.kHeadPitch.value,
+            H2_JointIndex.kHeadYaw.value,
+        ]
+        return motor_index.value in head_motors
 
 
 if __name__ == "__main__":

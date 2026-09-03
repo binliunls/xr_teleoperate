@@ -214,11 +214,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--camera-source",
         type=str,
-        choices=["zmq", "ros"],
-        default="ros",
-        help="Camera source: 'zmq' (teleimager image server) or 'ros' "
-        "(rclpy subscriber on /head/{left,right}/image_raw and /wrist/{left,right}/image_raw). "
-        "Default: zmq.",
+        choices=["dds", "zmq", "ros"],
+        default="dds",
+        help="Camera source: 'dds' (native CycloneDDS JPEG topics), 'zmq' "
+        "(teleimager image server), or 'ros' (sensor_msgs/Image topics). Default: dds.",
+    )
+    parser.add_argument(
+        "--camera-dds-domain",
+        type=int,
+        default=10,
+        help="Native camera DDS domain. Keep separate from Unitree/Sharpa domain 0. Default: 10.",
     )
     parser.add_argument(
         "--network-interface",
@@ -238,7 +243,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--head-pitch-home",
         type=float,
-        default=0.6,
+        default=0.7,
         metavar="RAD",
         help="H2 head pitch at home/rest position in radians (default: 0.3, looking slightly down). "
         "Range: -0.523 (up) to 0.837 (down).",
@@ -327,8 +332,16 @@ if __name__ == "__main__":
             )
             listen_keyboard_thread.start()
 
-        # image client — pick ZMQ (teleimager) or ROS 2 source
-        if args.camera_source == "ros":
+        # image client — native DDS, ROS 2, or legacy ZMQ
+        if args.camera_source == "dds":
+            from teleop.utils.dds_image_client import DDSImageClient
+
+            img_client = DDSImageClient(
+                domain_id=args.camera_dds_domain,
+                network_interface=args.network_interface,
+            )
+            logger_mp.info(f"[camera] using native DDS image source (domain {args.camera_dds_domain})")
+        elif args.camera_source == "ros":
             from teleop.utils.ros_image_client import ROSImageClient
 
             img_client = ROSImageClient()
@@ -786,12 +799,6 @@ if __name__ == "__main__":
                     with dual_hand_data_lock:
                         curr_left_ee = list(dual_hand_state_array[:SHARPA_DOF])
                         curr_right_ee = list(dual_hand_state_array[-SHARPA_DOF:])
-                    if all(v == 0.0 for v in curr_left_ee) and all(v == 0.0 for v in curr_right_ee):
-                        logger_mp.warning(
-                            "[SharpaWave] hand state is ALL ZEROS — check that the bridge "
-                            "(or retargeting -sdk -dds) is publishing rt/sharpa/{left,right}/state "
-                            "on the same DDS domain"
-                        )
                     # action[t] = state[t+1]: recorded action is the next step's observed state
                     left_ee_state = _sharpa_ee_prev[0] if _sharpa_ee_prev is not None else curr_left_ee
                     right_ee_state = _sharpa_ee_prev[1] if _sharpa_ee_prev is not None else curr_right_ee

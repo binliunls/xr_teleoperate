@@ -52,6 +52,7 @@ GROOT_VERSION="${GROOT_VERSION:-ab88b50c718f6528e1df9dcbaf75865d1b604760}"
 THOR_SETUP_SCRIPT="${THOR_SETUP_SCRIPT:-$XR_ROOT/setup_h2_thor.sh}"
 
 XR_ENV="${XR_ENV:-tv}"
+UNITREE_LEROBOT_ENV="${UNITREE_LEROBOT_ENV:-unitree_lerobot}"
 
 THOR_USER="${THOR_USER:-unitree}"
 THOR_IP="${THOR_IP:-192.168.123.163}"
@@ -269,7 +270,13 @@ conda_env_exists() {
 
 xr_run() {
     conda run --no-capture-output -n "$XR_ENV" \
-        env "PYTHONPATH=$XR_ROOT:$UNITREE_LEROBOT_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$@"
+        bash -c 'export PATH="$CONDA_PREFIX/bin:$PATH"; exec env "$@"' _ \
+        "PYTHONPATH=$XR_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$@"
+}
+
+unitree_lerobot_run() {
+    conda run --no-capture-output -n "$UNITREE_LEROBOT_ENV" \
+        bash -c 'export PATH="$CONDA_PREFIX/bin:$PATH"; exec "$@"' _ "$@"
 }
 
 print_config() {
@@ -292,6 +299,7 @@ Repositories (checkout @ pinned version)
   Isaac-GR00T        : $GROOT_ROOT @ $GROOT_VERSION
 MANUS Core SDK  : $MANUS_SDK_VERSION
 XR conda environment: $XR_ENV
+Unitree LeRobot environment: $UNITREE_LEROBOT_ENV
 EOF
 }
 
@@ -397,8 +405,15 @@ install_all() {
     xr_run python -m pip install -e "$XR_ROOT/teleop/robot_control/dex-retargeting"
     xr_run python -m pip install -r "$XR_ROOT/requirements.txt"
     xr_run python -m pip install -e "$SDK2_ROOT"
-    xr_run python -m pip install -e "$UNITREE_LEROBOT_ROOT"
     xr_run python -m pip install cyclonedds==0.10.2 msgpack msgpack-numpy pyzmq pyyaml opencv-python
+
+    if ! conda_env_exists "$UNITREE_LEROBOT_ENV"; then
+        info "Creating Unitree LeRobot environment $UNITREE_LEROBOT_ENV"
+        conda create -y -n "$UNITREE_LEROBOT_ENV" python=3.10
+    fi
+    info "Installing Unitree LeRobot in its isolated environment"
+    unitree_lerobot_run python -m pip install -U pip
+    unitree_lerobot_run python -m pip install -e "$UNITREE_LEROBOT_ROOT"
 
     manus_install
     info "Installation complete. Next: bash '$0' cert <workstation-IP> && bash '$0' doctor"
@@ -442,7 +457,7 @@ manus_install() {
 
     info "Installing MANUS retargeting Python dependencies"
     xr_run python -m pip install \
-        numpy==1.26.4 scipy==1.14.0 casadi==3.7.0 pyzmq==26.2.0 \
+        numpy==1.26.4 scipy==1.14.0 casadi==3.6.7 pyzmq==26.2.0 \
         protobuf==3.20.3 rich==14.0.0 matplotlib==3.7.5 mujoco==3.3.6
 
     info "Building the Sharpa MANUS acquisition client"
@@ -589,6 +604,16 @@ doctor() {
         fi
     else
         check_fail "conda is not installed"
+    fi
+    if command -v conda >/dev/null 2>&1 &&
+       conda_env_exists "$UNITREE_LEROBOT_ENV"; then
+        if unitree_lerobot_run python -c "import unitree_lerobot, matplotlib" >/dev/null 2>&1; then
+            check_ok "conda:$UNITREE_LEROBOT_ENV Unitree LeRobot dependencies"
+        else
+            check_fail "conda:$UNITREE_LEROBOT_ENV cannot import unitree_lerobot/matplotlib"
+        fi
+    else
+        check_fail "Missing conda:$UNITREE_LEROBOT_ENV"
     fi
     if [[ -f "$GROOT_ROOT/pyproject.toml" ]]; then
         check_ok "Isaac-GR00T source"

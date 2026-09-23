@@ -1,0 +1,63 @@
+CXX      := g++
+CXXFLAGS := -std=c++17 -O2 -Wall -Wextra
+
+UNITREE_SDK2_SEARCH := \
+	$(HOME)/unitree_repo/unitree_sdk2 \
+	$(HOME)/unitree_sdk2 \
+	/opt/unitree_sdk2 \
+	/opt/unitree_robotics \
+	$(HOME)/binliu/unitree_sdk2
+
+ifndef UNITREE_SDK2_DIR
+UNITREE_SDK2_DIR := $(firstword $(foreach d,$(UNITREE_SDK2_SEARCH),$(wildcard $(d))))
+endif
+
+ifeq ($(UNITREE_SDK2_DIR),)
+$(error Unitree C++ SDK not found. Set UNITREE_SDK2_DIR to its install/source directory)
+endif
+
+ARCH ?= $(shell uname -m)
+
+ifneq ($(wildcard $(UNITREE_SDK2_DIR)/thirdparty/.),)
+UNITREE_INC_DIR       ?= $(UNITREE_SDK2_DIR)/include
+UNITREE_THIRD_INC     ?= $(UNITREE_SDK2_DIR)/thirdparty/include
+UNITREE_THIRD_INC_CXX ?= $(UNITREE_SDK2_DIR)/thirdparty/include/ddscxx
+UNITREE_LIB_DIR       ?= $(UNITREE_SDK2_DIR)/lib/$(ARCH)
+UNITREE_THIRD_LIB_DIR ?= $(UNITREE_SDK2_DIR)/thirdparty/lib/$(ARCH)
+else
+UNITREE_INC_DIR       ?= $(UNITREE_SDK2_DIR)/include
+UNITREE_THIRD_INC     ?= $(UNITREE_SDK2_DIR)/include
+UNITREE_THIRD_INC_CXX ?= $(UNITREE_SDK2_DIR)/include/ddscxx
+UNITREE_LIB_DIR       ?= $(UNITREE_SDK2_DIR)/lib
+UNITREE_THIRD_LIB_DIR ?= $(UNITREE_SDK2_DIR)/lib
+endif
+
+INCLUDES := \
+	-I$(UNITREE_INC_DIR) \
+	-I$(UNITREE_THIRD_INC) \
+	-I$(UNITREE_THIRD_INC_CXX)
+
+LDFLAGS := \
+	-L$(UNITREE_LIB_DIR) -lunitree_sdk2 \
+	-L$(UNITREE_THIRD_LIB_DIR) -lddsc -lddscxx \
+	-Wl,-rpath,$(UNITREE_LIB_DIR) \
+	-Wl,-rpath,$(UNITREE_THIRD_LIB_DIR) \
+	-lpthread
+
+TARGET := probe_h2_dds
+SRC    := probe_h2_dds.cpp
+
+.PHONY: all clean info
+
+all: $(TARGET)
+
+$(TARGET): $(SRC)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< -o $@ $(LDFLAGS)
+
+clean:
+	rm -f $(TARGET)
+
+info:
+	@echo "UNITREE_SDK2_DIR = $(UNITREE_SDK2_DIR)"
+	@echo "UNITREE_LIB_DIR  = $(UNITREE_LIB_DIR)"
+	@echo "ARCH             = $(ARCH)"

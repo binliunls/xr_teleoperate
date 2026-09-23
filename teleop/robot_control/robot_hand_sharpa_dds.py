@@ -35,6 +35,8 @@ class SharpaHandDDSClient:
         self.side = side
         self._state_lock = threading.Lock()
         self._state_deg: list = [0.0] * NUM_JOINTS
+        self._state_sequence = 0
+        self._state_received_monotonic = None
 
         self._pub = ChannelPublisher(TOPIC_CMD[side], HandCmd_)
         self._pub.Init()
@@ -47,6 +49,8 @@ class SharpaHandDDSClient:
             return
         with self._state_lock:
             self._state_deg = [msg.motor_state[i].q for i in range(min(NUM_JOINTS, len(msg.motor_state)))]
+            self._state_sequence += 1
+            self._state_received_monotonic = time.monotonic()
 
     def _make_cmd(self, positions_rad: list) -> HandCmd_:
         # MotorCmd_ requires (mode, q, dq, tau, kp, kd, reserve); HandCmd_ requires (motor_cmd, reserve).
@@ -77,6 +81,20 @@ class SharpaHandDDSClient:
         """Return list of 22 joint angles in radians."""
         with self._state_lock:
             return [math.radians(d) for d in self._state_deg]
+
+    def get_state_diagnostics(self):
+        """Return an atomic position/freshness snapshot for read-only diagnostics."""
+        now = time.monotonic()
+        with self._state_lock:
+            positions_rad = [math.radians(d) for d in self._state_deg]
+            sequence_id = self._state_sequence
+            received_at = self._state_received_monotonic
+        age_s = math.inf if received_at is None else max(0.0, now - received_at)
+        return {
+            "positions_rad": positions_rad,
+            "sequence_id": sequence_id,
+            "age_s": age_s,
+        }
 
     def go_neutral(self):
         """Send all joints to zero."""

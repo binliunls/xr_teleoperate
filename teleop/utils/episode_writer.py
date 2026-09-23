@@ -1,4 +1,5 @@
 import os
+import shutil
 import cv2
 import json
 import datetime
@@ -243,6 +244,38 @@ class EpisodeWriter:
         """
         self.need_save = True  # Set the save flag
         logger_mp.info("==> Episode saved start...")
+
+    def abort_episode(self, reason: str):
+        """Quarantine the active episode instead of saving invalid camera data."""
+        if self.is_available:
+            return None
+
+        # No producer may call add_item while abort_episode runs. Drain all
+        # already-enqueued writes before renaming the directory.
+        self.item_data_queue.join()
+        self.need_save = False
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        invalid_dir = os.path.join(
+            self.task_dir,
+            f"invalid_camera_ep{self.episode_id:04d}_{timestamp}",
+        )
+        suffix = 1
+        while os.path.exists(invalid_dir):
+            invalid_dir = os.path.join(
+                self.task_dir,
+                f"invalid_camera_ep{self.episode_id:04d}_{timestamp}_{suffix}",
+            )
+            suffix += 1
+
+        with open(os.path.join(self.episode_dir, "INVALID_CAMERA.txt"), "w", encoding="utf-8") as f:
+            f.write(reason.rstrip() + "\n")
+        shutil.move(self.episode_dir, invalid_dir)
+        self.is_available = True
+        logger_mp.error(
+            f"==> Episode aborted due to camera failure and quarantined at: {invalid_dir}"
+        )
+        return invalid_dir
 
     def _save_episode(self):
         """

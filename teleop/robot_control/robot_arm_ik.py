@@ -1376,6 +1376,40 @@ class H1_ArmIK:
             return current_lr_arm_motor_q, np.zeros(self.reduced_robot.model.nv)
 
 
+_H2_DUAL_ARM_JOINTS = frozenset(
+    (
+        "left_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "left_wrist_roll_joint",
+        "left_wrist_pitch_joint",
+        "left_wrist_yaw_joint",
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint",
+        "right_wrist_roll_joint",
+        "right_wrist_pitch_joint",
+        "right_wrist_yaw_joint",
+    )
+)
+
+
+def _h2_joints_to_lock(robot):
+    """Lock every actuated joint except the 14 dual-arm joints."""
+    locked = []
+    for jid in range(1, robot.model.njoints):
+        jmodel = robot.model.joints[jid]
+        if jmodel.nq <= 0:
+            continue
+        jname = robot.model.names[jid]
+        if jname in _H2_DUAL_ARM_JOINTS:
+            continue
+        locked.append(jname)
+    return locked
+
+
 class H2_ArmIK:
     def __init__(self, Unit_Test=False, Visualization=False):
         np.set_printoptions(precision=5, suppress=True, linewidth=200)
@@ -1383,14 +1417,11 @@ class H2_ArmIK:
         self.Unit_Test = Unit_Test
         self.Visualization = Visualization
 
-        self.cache_path = "h2_model_cache.pkl"
-
-        if not self.Unit_Test:
-            self.urdf_path = "../assets/h2/H2.urdf"
-            self.model_dir = "../assets/h2/"
-        else:
-            self.urdf_path = "../../assets/h2/H2.urdf"
-            self.model_dir = "../../assets/h2/"
+        _ik_dir = os.path.dirname(os.path.abspath(__file__))
+        self.model_dir = os.path.normpath(os.path.join(_ik_dir, "..", "..", "assets", "h2"))
+        self.urdf_path = os.path.join(self.model_dir, "H2_with_sharpa_hands.urdf")
+        self.cache_path = os.path.join(_ik_dir, "h2_H2_with_sharpa_hands_model_cache.pkl")
+        logger_mp.info(f"[H2_ArmIK] URDF: {self.urdf_path}  (model_dir={self.model_dir})")
 
         # Try loading cache first
         if os.path.exists(self.cache_path) and (not self.Visualization):
@@ -1400,25 +1431,7 @@ class H2_ArmIK:
             logger_mp.info("[H2_ArmIK] >>> Loading URDF (slow)...")
             self.robot = pin.RobotWrapper.BuildFromURDF(self.urdf_path, self.model_dir)
 
-            self.mixed_jointsToLockIDs = [
-                "left_hip_pitch_joint",
-                "left_hip_roll_joint",
-                "left_hip_yaw_joint",
-                "left_knee_joint",
-                "left_ankle_pitch_joint",
-                "left_ankle_roll_joint",
-                "right_hip_pitch_joint",
-                "right_hip_roll_joint",
-                "right_hip_yaw_joint",
-                "right_knee_joint",
-                "right_ankle_pitch_joint",
-                "right_ankle_roll_joint",
-                "waist_yaw_joint",
-                "waist_roll_joint",
-                "waist_pitch_joint",
-                "head_pitch_joint",
-                "head_yaw_joint",
-            ]
+            self.mixed_jointsToLockIDs = _h2_joints_to_lock(self.robot)
 
             self.reduced_robot = self.robot.buildReducedRobot(
                 list_of_joints_to_lock=self.mixed_jointsToLockIDs,

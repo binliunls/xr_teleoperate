@@ -69,9 +69,9 @@ MANUS_ROOT="${MANUS_ROOT:-$WORKSPACE_ROOT/Sharpa/sharpa-manus-sdk}"
 MANUS_REPO="${MANUS_REPO:-https://github.com/sharpa-robotics/sharpa-manus-sdk.git}"
 MANUS_REPO_VERSION="${MANUS_REPO_VERSION:-b87bff567c82905dd591d91f08be59fb90a604df}"
 MANUS_CLIENT_DIR="${MANUS_CLIENT_DIR:-$MANUS_ROOT/client}"
-# Official MANUS Core SDK archive; unrelated to the sharpa-manus-sdk git pin above.
-MANUS_SDK_VERSION="${MANUS_SDK_VERSION:-3.1.1}"
-MANUS_SDK_URL="${MANUS_SDK_URL:-https://static.manus-meta.com/resources/manus_core_3/sdk/MANUS_Core_${MANUS_SDK_VERSION}_SDK.zip}"
+# Official MANUS Core Linux SDK archive; unrelated to the sharpa-manus-sdk git pin above.
+MANUS_SDK_VERSION="${MANUS_SDK_VERSION:-3.2.1}"
+MANUS_SDK_URL="${MANUS_SDK_URL:-https://static.manus-meta.com/resources/manus_core_3/sdk/MANUS_Core_${MANUS_SDK_VERSION}_SDK_Linux.tar.gz}"
 
 RED=$'\033[0;31m'
 YELLOW=$'\033[0;33m'
@@ -95,6 +95,7 @@ Configuration and installation
   install                          Build tv; install XR/SDK2/LeRobot packages and MANUS SDK/client
   install-groot                    Install the Isaac-GR00T uv/CUDA Python environment
   manus-install                    Install the official MANUS Integrated SDK and build the acquisition client
+  manus-usb-setup                  Install/reload the official MANUS USB permission rules
   manus-start                      Start the MANUS client in the foreground and publish skeletons on localhost:2044
   manus-check                      Check the MANUS client, SDK shared libraries, and port 2044 listener
   thor-sync [local-xr-root]        Deploy Thor files from <xr-root>/scripts
@@ -218,15 +219,17 @@ ensure_all_repos() {
     need_dir "$SHARPA_RETARGET_DIR"
 }
 
-# Two fixes that upstream sharpa-manus-sdk still needs for the H2 + Sharpa
+# Local fixes that upstream sharpa-manus-sdk still needs for the H2 + Sharpa
 # setup. Each is guarded by a content check, so re-running is a no-op and a
 # checkout that already carries the fix by hand is left alone.
 manus_apply_local_fixes() {
     local fresh_clone="${1:-0}"
     local client_cpp="$MANUS_CLIENT_DIR/SharpaManusClient.cpp"
     local makefile="$MANUS_CLIENT_DIR/Makefile"
+    local calibration_makefile="$MANUS_CLIENT_DIR/CalibrationGUI/Makefile"
     need_file "$client_cpp"
     need_file "$makefile"
+    need_file "$calibration_makefile"
 
     # Upstream rotates the four pinky nodes into the thumb slots, which shifts
     # every finger by one -- index motion ends up driving the Sharpa middle
@@ -244,9 +247,34 @@ manus_apply_local_fixes() {
         warn "No known reorderedIndices line in $client_cpp; verify the finger order by hand"
     fi
 
-    # Upstream bakes in a relative rpath, so the client only resolves
-    # libManusSDK_Integrated.so when it is started from client/. Anchor the
-    # lookup to the binary instead.
+    # MANUS Core 3.2 unified the integrated and remote Linux libraries as
+    # libManusSDK.so. Update the older client Makefile to use that library.
+    local sdk_lib_old='-lManusSDK_Integrated'
+    local sdk_lib_new='-lManusSDK'
+    if grep -qE -- '(^|[[:space:]])-lManusSDK([[:space:]]|$)' "$makefile"; then
+        info "Makefile already links the MANUS Core 3.2 library"
+    elif grep -qF -- "$sdk_lib_old" "$makefile"; then
+        info "Updating Makefile for the MANUS Core 3.2 unified library"
+        sed -i "s|$sdk_lib_old|$sdk_lib_new|" "$makefile"
+        grep -qF -- "$sdk_lib_new" "$makefile" ||
+            die "The MANUS Core 3.2 library-name fix did not apply"
+    else
+        die "No known MANUS SDK library name in $makefile"
+    fi
+
+    if grep -qE -- '(^|[[:space:]])-lManusSDK([[:space:]]|$)' "$calibration_makefile"; then
+        info "CalibrationGUI Makefile already links the MANUS Core 3.2 library"
+    elif grep -qF -- "$sdk_lib_old" "$calibration_makefile"; then
+        info "Updating CalibrationGUI Makefile for the MANUS Core 3.2 unified library"
+        sed -i "s|$sdk_lib_old|$sdk_lib_new|" "$calibration_makefile"
+        grep -qE -- '(^|[[:space:]])-lManusSDK([[:space:]]|$)' "$calibration_makefile" ||
+            die "The CalibrationGUI MANUS Core 3.2 library-name fix did not apply"
+    else
+        die "No known MANUS SDK library name in $calibration_makefile"
+    fi
+
+    # Upstream bakes in a relative rpath, so the client only resolves the SDK
+    # when it is started from client/. Anchor the lookup to the binary instead.
     local rpath_old='-Wl,-rpath=./ManusSDK/lib'
     local rpath_new="-Wl,-rpath='\$\$ORIGIN/ManusSDK/lib'"
     if grep -qF -- "$rpath_new" "$makefile"; then
@@ -259,9 +287,41 @@ manus_apply_local_fixes() {
         warn "No known rpath in $makefile; verify it by hand"
     fi
 
+    local calibration_rpath_old='-Wl,-rpath=../ManusSDK/lib'
+    local calibration_rpath_new="-Wl,-rpath='\$\$ORIGIN/../ManusSDK/lib'"
+    if grep -qF -- "$calibration_rpath_new" "$calibration_makefile"; then
+        info 'CalibrationGUI rpath is already anchored to $ORIGIN'
+    elif grep -qF -- "$calibration_rpath_old" "$calibration_makefile"; then
+        info 'Anchoring the CalibrationGUI rpath to $ORIGIN'
+        sed -i "s|$calibration_rpath_old|$calibration_rpath_new|" "$calibration_makefile"
+        grep -qF -- "$calibration_rpath_new" "$calibration_makefile" ||
+            die "The CalibrationGUI rpath fix did not apply"
+    else
+        warn "No known rpath in $calibration_makefile; verify it by hand"
+    fi
+
     if [[ "$fresh_clone" == "1" ]]; then
         warn "Fresh sharpa-manus-sdk clone: the Calibration_left.mcal/Calibration_right.mcal files are upstream defaults, not this workstation's gloves. Recalibrate both gloves in client/CalibrationGUI before collecting data."
     fi
+}
+
+install_manus_udev_rules() {
+    local rules_path="/etc/udev/rules.d/70-manus-hid.rules"
+    local rules
+    rules=$'# MANUS Core SDK: HIDAPI/libusb\n'
+    rules+=$'SUBSYSTEMS=="usb", ATTRS{idVendor}=="3325", MODE:="0666"\n'
+    rules+=$'SUBSYSTEMS=="usb", ATTRS{idVendor}=="1915", ATTRS{idProduct}=="83fd", MODE:="0666"\n'
+    rules+=$'# MANUS Core SDK: HIDAPI/hidraw\n'
+    rules+=$'KERNEL=="hidraw*", ATTRS{idVendor}=="3325", MODE:="0666"\n'
+
+    if [[ -r "$rules_path" ]] && [[ "$(<"$rules_path")"$'\n' == "$rules" ]]; then
+        info "MANUS USB udev rules are already installed"
+    else
+        info "Installing MANUS USB udev rules"
+        printf '%s' "$rules" | sudo tee "$rules_path" >/dev/null
+    fi
+    sudo udevadm control --reload-rules
+    sudo udevadm trigger --subsystem-match=usb
 }
 
 conda_env_exists() {
@@ -423,36 +483,56 @@ manus_install() {
     [[ "$(uname -m)" == "x86_64" ]] ||
         die "The MANUS Linux SDK package requires an x86_64 workstation; current architecture: $(uname -m)"
     need_cmd curl
-    need_cmd unzip
+    need_cmd tar
     need_cmd make
     need_cmd g++
     check_build_deps
+    install_manus_udev_rules
     ensure_repo sharpa-manus-sdk "$MANUS_ROOT" "$MANUS_REPO" "$MANUS_REPO_VERSION"
     manus_apply_local_fixes "$REPO_WAS_CLONED"
     ensure_repo sharpa-teleop "$SHARPA_TELEOP_ROOT" "$SHARPA_TELEOP_REPO" "$SHARPA_TELEOP_VERSION"
     need_file "$SHARPA_RETARGET_DIR/retargeting_manus_demo_dds.py"
 
-    # The repository ships its own older ManusSDK copy, so a fresh clone looks
-    # complete even though the client needs Core 3.1.x. CoreSdk_SetLogLocation
-    # was added in 3.1.x, which distinguishes the two without a version macro.
+    # The repository ships an older SDK copy. MANUS Core 3.2 uses a restructured
+    # Linux tarball and one unified libManusSDK.so for integrated/remote modes.
+    # Our marker records the package version because the public headers and ELF
+    # library do not expose a reliable pre-connection version string.
     local sdk_dir="$MANUS_CLIENT_DIR/ManusSDK"
+    local version_marker="$sdk_dir/.manus_sdk_version"
     if [[ -f "$sdk_dir/include/ManusSDK.h" &&
-          -f "$sdk_dir/lib/libManusSDK_Integrated.so" ]] &&
-       grep -q 'CoreSdk_SetLogLocation' "$sdk_dir/include/ManusSDK.h"; then
-        info "Reusing the installed MANUS SDK: $sdk_dir"
+          -f "$sdk_dir/lib/libManusSDK.so" &&
+          -f "$version_marker" &&
+          "$(<"$version_marker")" == "$MANUS_SDK_VERSION" ]]; then
+        info "Reusing MANUS Core SDK $MANUS_SDK_VERSION: $sdk_dir"
     else
-        local archive
-        archive="$(mktemp --suffix=.zip)"
-        info "Downloading MANUS Core SDK $MANUS_SDK_VERSION (approximately 208 MiB), replacing any bundled copy"
+        local archive extract_dir package_root
+        archive="$(mktemp --suffix=.tar.gz)"
+        extract_dir="$(mktemp -d)"
+        package_root="$extract_dir/C++/SDKClient/ManusSDK"
+        info "Downloading MANUS Core SDK $MANUS_SDK_VERSION for Linux (approximately 212 MiB)"
         curl --fail --location --show-error "$MANUS_SDK_URL" --output "$archive"
+        tar -xzf "$archive" -C "$extract_dir" \
+            "C++/SDKClient/ManusSDK/include" \
+            "C++/SDKClient/ManusSDK/lib/amd64/libManusSDK-amd64.so"
+        need_file "$package_root/include/ManusSDK.h"
+        need_file "$package_root/lib/amd64/libManusSDK-amd64.so"
+
+        if [[ -d "$sdk_dir" ]]; then
+            local backup_dir="${sdk_dir}.backup-before-${MANUS_SDK_VERSION}"
+            if [[ ! -e "$backup_dir" ]]; then
+                info "Backing up the previous MANUS SDK to $backup_dir"
+                cp -a "$sdk_dir" "$backup_dir"
+            fi
+        fi
+        rm -rf "$sdk_dir/include" "$sdk_dir/lib"
         mkdir -p "$sdk_dir/include" "$sdk_dir/lib"
-        unzip -jo "$archive" \
-            "ManusSDK_v${MANUS_SDK_VERSION}/SDKClient_Linux/ManusSDK/include/*.h" \
-            -d "$sdk_dir/include"
-        unzip -jo "$archive" \
-            "ManusSDK_v${MANUS_SDK_VERSION}/SDKClient_Linux/ManusSDK/lib/libManusSDK_Integrated.so" \
-            -d "$sdk_dir/lib"
-        rm -f "$archive"
+        cp -a "$package_root/include/." "$sdk_dir/include/"
+        install -m 0755 \
+            "$package_root/lib/amd64/libManusSDK-amd64.so" \
+            "$sdk_dir/lib/libManusSDK.so"
+        printf '%s\n' "$MANUS_SDK_VERSION" > "$version_marker"
+        rm -rf "$archive" "$extract_dir"
+        info "Installed MANUS Core SDK $MANUS_SDK_VERSION in $sdk_dir"
     fi
 
     info "Installing MANUS retargeting Python dependencies"
@@ -504,7 +584,7 @@ EOF
 manus_check() {
     local client="$MANUS_CLIENT_DIR/SharpaManusClient.out"
     need_file "$client"
-    need_file "$MANUS_CLIENT_DIR/ManusSDK/lib/libManusSDK_Integrated.so"
+    need_file "$MANUS_CLIENT_DIR/ManusSDK/lib/libManusSDK.so"
     need_cmd ss
     if ldd "$client" | awk '/not found/{found=1} END{exit !found}'; then
         ldd "$client" >&2
@@ -637,7 +717,7 @@ doctor() {
         check_fail "Missing DDSImageClient"
     fi
     if [[ -x "$MANUS_CLIENT_DIR/SharpaManusClient.out" ]] &&
-       [[ -f "$MANUS_CLIENT_DIR/ManusSDK/lib/libManusSDK_Integrated.so" ]] &&
+       [[ -f "$MANUS_CLIENT_DIR/ManusSDK/lib/libManusSDK.so" ]] &&
        ! ldd "$MANUS_CLIENT_DIR/SharpaManusClient.out" | awk '/not found/{found=1} END{exit !found}'; then
         check_ok "MANUS Integrated SDK/client"
     else
@@ -743,6 +823,7 @@ main() {
         install) install_all "$@" ;;
         install-groot) install_groot "$@" ;;
         manus-install) manus_install "$@" ;;
+        manus-usb-setup) install_manus_udev_rules "$@" ;;
         manus-start) manus_start "$@" ;;
         manus-check) manus_check "$@" ;;
         cert) make_cert "$@" ;;

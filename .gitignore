@@ -4,6 +4,10 @@ __MACOSX/
 *pycache*
 *.pyc
 *.egg-info
+# Local Sharpa Manus build outputs and runtime logs.
+third_party/sharpa-manus-sdk-1.1.0/client/objects/*.o
+third_party/sharpa-manus-sdk-1.1.0/client/objects/*.d
+third_party/sharpa-manus-sdk-1.1.0/retargeting_alg_release_V5.0/logs/*.log
 *.mp4
 *build/
 *.pem

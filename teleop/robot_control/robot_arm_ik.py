@@ -1383,6 +1383,7 @@ class H2_ArmIK:
         self.Unit_Test = Unit_Test
         self.Visualization = Visualization
 
+        # fixed cache file path
         self.cache_path = "h2_model_cache.pkl"
 
         if not self.Unit_Test:
@@ -1446,14 +1447,17 @@ class H2_ArmIK:
                 self.save_cache()
                 logger_mp.info(f">>> Cache saved to {self.cache_path}")
 
+        # Creating Casadi models and data for symbolic computing
         self.cmodel = cpin.Model(self.reduced_robot.model)
         self.cdata = self.cmodel.createData()
 
+        # Creating symbolic variables
         self.cq = casadi.SX.sym("q", self.reduced_robot.model.nq, 1)
         self.cTf_l = casadi.SX.sym("tf_l", 4, 4)
         self.cTf_r = casadi.SX.sym("tf_r", 4, 4)
         cpin.framesForwardKinematics(self.cmodel, self.cdata, self.cq)
 
+        # Get the hand joint ID and define the error function
         self.L_hand_id = self.reduced_robot.model.getFrameId("L_ee")
         self.R_hand_id = self.reduced_robot.model.getFrameId("R_ee")
 
@@ -1478,6 +1482,7 @@ class H2_ArmIK:
             ],
         )
 
+        # Defining the optimization problem
         self.opti = casadi.Opti()
         self.var_q = self.opti.variable(self.reduced_robot.model.nq)
         self.var_q_last = self.opti.parameter(self.reduced_robot.model.nq)  # for smooth
@@ -1488,6 +1493,7 @@ class H2_ArmIK:
         self.regularization_cost = casadi.sumsqr(self.var_q)
         self.smooth_cost = casadi.sumsqr(self.var_q - self.var_q_last)
 
+        # Setting optimization constraints and goals
         self.opti.subject_to(
             self.opti.bounded(
                 self.reduced_robot.model.lowerPositionLimit,
@@ -1495,13 +1501,15 @@ class H2_ArmIK:
                 self.reduced_robot.model.upperPositionLimit,
             )
         )
-        self.opti.minimize(50 * self.translational_cost + 0.8 * self.rotation_cost + 0.02 * self.regularization_cost + 0.1 * self.smooth_cost)
+        self.opti.minimize(50 * self.translational_cost + 0.8 * self.rotation_cost + 0.01 * self.regularization_cost + 0.1 * self.smooth_cost)
 
         opts = {
+            # CasADi-level options
             "expand": True,
             "detect_simple_bounds": True,
             "calc_lam_p": False,
             "print_time": False,
+            # IPOPT solver options
             "ipopt.sb": "yes",
             "ipopt.print_level": 0,
             "ipopt.max_iter": 30,
@@ -1519,6 +1527,7 @@ class H2_ArmIK:
         self.vis = None
 
         if self.Visualization:
+            # Initialize the Meshcat visualizer for visualization
             self.vis = MeshcatVisualizer(self.reduced_robot.model, self.reduced_robot.collision_model, self.reduced_robot.visual_model)
             self.vis.initViewer(open=True)
             self.vis.loadViewerModel("pinocchio")
@@ -1527,21 +1536,15 @@ class H2_ArmIK:
 
             frame_viz_names = ["L_ee_target", "R_ee_target"]
             FRAME_AXIS_POSITIONS = (
-                np.array([[0, 0, 0], [1, 0, 0], [0, 0, 0], [0, 1, 0], [0, 0, 0], [0, 0, 1]]).astype(np.float32).T
+                np.array([[0, 0, 0], [1, 0, 0], 
+                          [0, 0, 0], [0, 1, 0], 
+                          [0, 0, 0], [0, 0, 1]]).astype(np.float32).T
             )
             FRAME_AXIS_COLORS = (
                 np.array(
-                    [
-                        [1, 0, 0],
-                        [1, 0.6, 0],
-                        [0, 1, 0],
-                        [0.6, 1, 0],
-                        [0, 0, 1],
-                        [0, 0.6, 1],
-                    ]
-                )
-                .astype(np.float32)
-                .T
+                    [[1, 0, 0], [1, 0.6, 0],
+                     [0, 1, 0], [0.6, 1, 0],
+                     [0, 0, 1], [0, 0.6, 1]]).astype(np.float32).T
             )
             axis_length = 0.1
             axis_width = 20
@@ -1570,15 +1573,23 @@ class H2_ArmIK:
     def load_cache(self):
         with open(self.cache_path, "rb") as f:
             data = pickle.load(f)
+
         robot = pin.RobotWrapper()
         robot.model = data["robot_model"]
         robot.data = robot.model.createData()
+
         reduced_robot = pin.RobotWrapper()
         reduced_robot.model = data["reduced_model"]
         reduced_robot.data = reduced_robot.model.createData()
         return robot, reduced_robot
 
-    def scale_arms(self, human_left_pose, human_right_pose, human_arm_length=0.60, robot_arm_length=0.75):
+    def scale_arms(
+        self,
+        human_left_pose,
+        human_right_pose,
+        human_arm_length=0.60,
+        robot_arm_length=0.75,
+    ):
         scale_factor = robot_arm_length / human_arm_length
         robot_left_pose = human_left_pose.copy()
         robot_right_pose = human_right_pose.copy()
@@ -1597,6 +1608,7 @@ class H2_ArmIK:
             self.init_data = current_lr_arm_motor_q
         self.opti.set_initial(self.var_q, self.init_data)
 
+        # left_wrist, right_wrist = self.scale_arms(left_wrist, right_wrist)
         if self.Visualization:
             self.vis.viewer["L_ee_target"].set_transform(left_wrist)
             self.vis.viewer["R_ee_target"].set_transform(right_wrist)
@@ -1607,6 +1619,8 @@ class H2_ArmIK:
 
         try:
             sol = self.opti.solve()
+            # sol = self.opti.solve_limited()
+
             sol_q = self.opti.value(self.var_q)
             self.smooth_filter.add_data(sol_q)
             sol_q = self.smooth_filter.filtered_data
@@ -1617,21 +1631,17 @@ class H2_ArmIK:
                 v = (sol_q - self.init_data) * 0.0
 
             self.init_data = sol_q
-            sol_tauff = pin.rnea(
-                self.reduced_robot.model,
-                self.reduced_robot.data,
-                sol_q,
-                v,
-                np.zeros(self.reduced_robot.model.nv),
-            )
+
+            sol_tauff = pin.rnea(self.reduced_robot.model, self.reduced_robot.data, sol_q, v, np.zeros(self.reduced_robot.model.nv))
 
             if self.Visualization:
-                self.vis.display(sol_q)
+                self.vis.display(sol_q)  # for visualization
 
             return sol_q, sol_tauff
 
         except Exception as e:
             logger_mp.error(f"ERROR in convergence, plotting debug info.{e}")
+
             sol_q = self.opti.debug.value(self.var_q)
             self.smooth_filter.add_data(sol_q)
             sol_q = self.smooth_filter.filtered_data
@@ -1642,20 +1652,15 @@ class H2_ArmIK:
                 v = (sol_q - self.init_data) * 0.0
 
             self.init_data = sol_q
-            sol_tauff = pin.rnea(
-                self.reduced_robot.model,
-                self.reduced_robot.data,
-                sol_q,
-                v,
-                np.zeros(self.reduced_robot.model.nv),
-            )
+            sol_tauff = pin.rnea(self.reduced_robot.model, self.reduced_robot.data, sol_q, v, np.zeros(self.reduced_robot.model.nv))
 
             logger_mp.error(
                 f"sol_q:{sol_q} \nmotorstate: \n{current_lr_arm_motor_q} \nleft_pose: \n{left_wrist} \nright_pose: \n{right_wrist}"
             )
             if self.Visualization:
-                self.vis.display(sol_q)
+                self.vis.display(sol_q)  # for visualization
 
+            # return sol_q, sol_tauff
             return current_lr_arm_motor_q, np.zeros(self.reduced_robot.model.nv)
 
 

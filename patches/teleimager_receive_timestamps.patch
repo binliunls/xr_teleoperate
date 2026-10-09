@@ -1,0 +1,123 @@
+diff --git a/src/teleimager/image_client.py b/src/teleimager/image_client.py
+index 395a516..3b354e6 100644
+--- a/src/teleimager/image_client.py
++++ b/src/teleimager/image_client.py
+@@ -285,12 +285,24 @@ class ZMQ_PublisherManager:
+ # ========================================================
+ class TeleImage:
+     _NOT_SET = object()
+-    __slots__ = ['jpg', '_bgr', 'fps']
+-
+-    def __init__(self, fps: float, jpg: Optional[bytes], bgr: Any = _NOT_SET):
++    __slots__ = [
++        'jpg', '_bgr', 'fps',
++        'workstation_receive_monotonic_ns', 'workstation_receive_realtime_ns',
++    ]
++
++    def __init__(
++        self,
++        fps: float,
++        jpg: Optional[bytes],
++        bgr: Any = _NOT_SET,
++        workstation_receive_monotonic_ns: Optional[int] = None,
++        workstation_receive_realtime_ns: Optional[int] = None,
++    ):
+         self.fps = fps
+         self.jpg = jpg
+         self._bgr = bgr
++        self.workstation_receive_monotonic_ns = workstation_receive_monotonic_ns
++        self.workstation_receive_realtime_ns = workstation_receive_realtime_ns
+ 
+     @property
+     def bgr(self) -> Optional[np.ndarray]:
+@@ -370,11 +382,14 @@ class ZMQ_SubscriberThread(threading.Thread):
+     def _decoder_loop(self):
+         while self._running:
+             try:
+-                jpg_bytes = self._bgr_decode_queue.get(timeout=0.1)
+-                if jpg_bytes is None:
++                record = self._bgr_decode_queue.get(timeout=0.1)
++                if record is None:
+                     continue
++                jpg_bytes, receive_monotonic_ns, receive_realtime_ns = record
+                 img_numpy = self._decode_image(jpg_bytes)
+-                self._bgr_3ring_buffer.write(img_numpy)
++                self._bgr_3ring_buffer.write(
++                    (img_numpy, receive_monotonic_ns, receive_realtime_ns)
++                )
+                 self._bgr_decode_queue.task_done()
+             except queue.Empty:
+                 continue
+@@ -393,12 +408,37 @@ class ZMQ_SubscriberThread(threading.Thread):
+             The latest message as a TeleImage object containing raw bytes, decoded BGR image (if enabled), and FPS.
+         """
+         current_fps = self._fps_monitor.fps
+-        jpg_data = self._jpg_3ring_buffer.read()
++        jpg_record = self._jpg_3ring_buffer.read()
++        if jpg_record is None:
++            jpg_data = None
++            jpg_receive_monotonic_ns = None
++            jpg_receive_realtime_ns = None
++        else:
++            jpg_data, jpg_receive_monotonic_ns, jpg_receive_realtime_ns = jpg_record
+         if not self._request_bgr:
+-            return TeleImage(fps=current_fps, jpg=jpg_data)
+-
+-        bgr_data = self._bgr_3ring_buffer.read()
+-        return TeleImage(fps=current_fps, jpg=jpg_data, bgr=bgr_data)
++            return TeleImage(
++                fps=current_fps,
++                jpg=jpg_data,
++                workstation_receive_monotonic_ns=jpg_receive_monotonic_ns,
++                workstation_receive_realtime_ns=jpg_receive_realtime_ns,
++            )
++
++        bgr_record = self._bgr_3ring_buffer.read()
++        if bgr_record is None:
++            bgr_data = None
++            bgr_receive_monotonic_ns = None
++            bgr_receive_realtime_ns = None
++        else:
++            bgr_data, bgr_receive_monotonic_ns, bgr_receive_realtime_ns = bgr_record
++        return TeleImage(
++            fps=current_fps,
++            jpg=jpg_data,
++            bgr=bgr_data,
++            # The teleop recorder consumes BGR, so expose the timestamp of the
++            # decoded frame rather than that of a potentially newer JPEG.
++            workstation_receive_monotonic_ns=bgr_receive_monotonic_ns,
++            workstation_receive_realtime_ns=bgr_receive_realtime_ns,
++        )
+ 
+     def stop(self) -> None:
+         """Stop the subscriber thread gracefully."""
+@@ -428,14 +468,20 @@ class ZMQ_SubscriberThread(threading.Thread):
+                     try:
+                         # receive the latest message
+                         img_bytes = self._socket.recv()
++                        receive_monotonic_ns = time.monotonic_ns()
++                        receive_realtime_ns = time.time_ns()
+                         # write to 3-ring-buffer
+-                        self._jpg_3ring_buffer.write(img_bytes)
++                        self._jpg_3ring_buffer.write(
++                            (img_bytes, receive_monotonic_ns, receive_realtime_ns)
++                        )
+                         # enqueue for decoding if needed
+                         if self._request_bgr:
+                             try:
+                                 if self._bgr_decode_queue.full():
+                                     self._bgr_decode_queue.get_nowait()
+-                                self._bgr_decode_queue.put_nowait(img_bytes)
++                                self._bgr_decode_queue.put_nowait(
++                                    (img_bytes, receive_monotonic_ns, receive_realtime_ns)
++                                )
+                             except queue.Full:
+                                 pass
+                         # update fps
+@@ -770,4 +816,4 @@ def main():
+         time.sleep(0.002)
+ 
+ if __name__ == "__main__":
+-    main()
+\ No newline at end of file
++    main()

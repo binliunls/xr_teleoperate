@@ -361,7 +361,12 @@ class ROSImageClient:
         if self._spin_thread.is_alive():
             self._spin_thread.join(timeout=2.0)
         try:
-            self._node.destroy_node()
+            # On SIGINT rclpy shuts the context down before we get here and the
+            # spin thread dies still holding the node "in use"; destroy_node()
+            # would then block forever in destroy_when_not_in_use(). Only
+            # destroy while the context is still alive.
+            if self._rclpy.ok():
+                self._node.destroy_node()
         except Exception:
             pass
         try:

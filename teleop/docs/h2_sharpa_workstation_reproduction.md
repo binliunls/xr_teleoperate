@@ -262,8 +262,14 @@ tactile stream remains on Thor until it is finalized and fetched with:
 
 ```bash
 python -m teleop.utils.fetch_sharpa_native_capture \
-  ~/datasets/TASK/episode_NNNN
+  ~/datasets/TASK
 ```
+
+This task-folder form processes every direct `episode_<number>` child in
+numeric order. It verifies and skips captures that are already installed,
+continues after per-episode failures, and exits nonzero if any episode could
+not be fetched or verified. Passing one `episode_NNNN` directory remains
+supported.
 
 Copying only `xr_teleoperate`, or adding only the `.125` address, is therefore
 not sufficient. Reproduction requires the software environment, both local DDS

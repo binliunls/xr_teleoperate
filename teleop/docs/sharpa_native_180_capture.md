@@ -240,19 +240,27 @@ Thor writes the native capture under:
 This host path is the SCP source of truth. `/recordings/...` is the container
 mount path and must not be used from the workstation.
 
-After the episode has stopped and both save/finalize operations have finished,
-fetch it manually:
+After the episodes have stopped and both save/finalize operations have
+finished, fetch every direct `episode_<number>` child of a task folder in one
+command:
 
 ```bash
 conda activate tv
 cd /home/haochen/Projects_Haochen/xr_teleoperate
 python -m teleop.utils.fetch_sharpa_native_capture \
-    ~/datasets/TASK/episode_NNNN
+    ~/datasets/TASK
 ```
 
-The command fetches from `unitree@192.168.125.163`, verifies the authoritative
-manifest and hashes, rejects partial/unlisted files and unsafe paths, and then
-atomically installs:
+The original single-episode form remains supported by passing
+`~/datasets/TASK/episode_NNNN`. In task-folder mode, episodes are processed in
+numeric order and a failure in one episode does not prevent later episodes
+from being checked. The command exits nonzero if any episode fails. A capture
+already present locally is verified and reported as `already_present`; it is
+never silently overwritten.
+
+The command fetches from `unitree@192.168.125.163`, verifies each authoritative
+manifest and its hashes, rejects partial/unlisted files and unsafe paths, and
+then atomically installs:
 
 ```text
 ~/datasets/TASK/episode_NNNN/sharpa_native_capture/

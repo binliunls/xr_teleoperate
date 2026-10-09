@@ -1,9 +1,11 @@
 import hashlib
+import io
 import json
 import shutil
 import tempfile
 import unittest
 import uuid
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -11,8 +13,10 @@ from teleop.utils.fetch_sharpa_native_capture import (
     CAPTURE_METADATA_FILENAME,
     DEFAULT_HOST_CAPTURE_ROOT,
     CaptureFetchError,
+    VerificationResult,
     fetch_episode_capture,
     load_capture_reference,
+    main,
     verify_capture_directory,
 )
 
@@ -309,6 +313,100 @@ class SharpaNativeFetchReferenceTest(unittest.TestCase):
 
             with self.assertRaisesRegex(CaptureFetchError, "refusing to overwrite"):
                 fetch_episode_capture(episode)
+
+
+class SharpaNativeFetchBatchTest(unittest.TestCase):
+    @staticmethod
+    def _result(capture_id=None):
+        return VerificationResult(
+            capture_id=capture_id or str(uuid.uuid4()),
+            manifest_sha256="a" * 64,
+            chunk_count=1,
+            chunk_bytes=123,
+            clock_path="clock_samples.jsonl",
+        )
+
+    def test_single_episode_cli_behavior_remains_supported(self):
+        with tempfile.TemporaryDirectory() as root:
+            episode = Path(root) / "episode_0007"
+            episode.mkdir()
+            result = self._result()
+            installed = episode / "sharpa_native_capture"
+
+            with mock.patch(
+                "teleop.utils.fetch_sharpa_native_capture.fetch_episode_capture",
+                return_value=(installed, result),
+            ) as fetch, redirect_stdout(io.StringIO()) as stdout:
+                return_code = main([str(episode), "--thor", "robot@thor"])
+
+            self.assertEqual(return_code, 0)
+            fetch.assert_called_once_with(
+                str(episode),
+                thor="robot@thor",
+                allow_default_host_path=False,
+                expected_host_root=DEFAULT_HOST_CAPTURE_ROOT,
+            )
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["capture_id"], result.capture_id)
+            self.assertNotIn("status", payload)
+
+    def test_task_cli_uses_numeric_order_and_continues_after_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            task = Path(root) / "task"
+            task.mkdir()
+            (task / "episode_0010").mkdir()
+            (task / "episode_0002").mkdir()
+            (task / "episode_bad").mkdir()
+            calls = []
+
+            def fake_fetch(episode_dir, **kwargs):
+                calls.append((episode_dir.name, kwargs))
+                if episode_dir.name == "episode_0002":
+                    raise CaptureFetchError("metadata incomplete")
+                result = self._result()
+                return episode_dir / "sharpa_native_capture", result, "fetched"
+
+            with mock.patch(
+                "teleop.utils.fetch_sharpa_native_capture._fetch_or_verify_batch_episode",
+                side_effect=fake_fetch,
+            ), redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()) as stderr:
+                return_code = main([str(task), "--thor", "robot@thor"])
+
+            self.assertEqual(return_code, 1)
+            self.assertEqual([call[0] for call in calls], ["episode_0002", "episode_0010"])
+            self.assertTrue(all(call[1]["thor"] == "robot@thor" for call in calls))
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["episode_count"], 2)
+            self.assertEqual(payload["fetched_count"], 1)
+            self.assertEqual(payload["failed_count"], 1)
+            self.assertIn("[episode_0002] error: metadata incomplete", stderr.getvalue())
+
+    def test_task_cli_verifies_an_existing_capture_without_scp(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            source_root = root_path / "source"
+            source_root.mkdir()
+            fixture = _CaptureFixture(source_root)
+            task = root_path / "task"
+            task.mkdir()
+            episode = task / "episode_0001"
+            episode.mkdir()
+            _write_episode_metadata(episode, fixture.capture_id)
+            shutil.copytree(
+                fixture.capture_dir,
+                episode / "sharpa_native_capture",
+            )
+
+            with mock.patch(
+                "teleop.utils.fetch_sharpa_native_capture.subprocess.run"
+            ) as scp, redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()):
+                return_code = main([str(task)])
+
+            self.assertEqual(return_code, 0)
+            scp.assert_not_called()
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["already_present_count"], 1)
+            self.assertEqual(payload["episodes"][0]["status"], "already_present")
 
 
 if __name__ == "__main__":

@@ -231,6 +231,18 @@ if __name__ == "__main__":
         help="Select XR device input tracking source",
     )
     parser.add_argument(
+        "--wrist-offset",
+        action="store_true",
+        help="Apply calibrated targetRay→wrist translation offsets so the tracked point is the "
+        "operator's wrist pivot instead of the controller origin (controller input mode only)",
+    )
+    parser.add_argument(
+        "--wrist-offset-dir",
+        type=str,
+        default="/home/haochen/Projects_Haochen/calib_teleop",
+        help="Directory containing calib_vuer_pivot_{left,right}_*.npz (newest file per side is used)",
+    )
+    parser.add_argument(
         "--display-mode",
         type=str,
         choices=["immersive", "ego", "pass-through"],
@@ -568,6 +580,23 @@ if __name__ == "__main__":
             args.display_mode == "pass-through" or camera_config["head_camera"]["enable_webrtc"]
         )
 
+        # Calibrated wrist offsets (targetRay origin → operator wrist pivot, targetRay frame).
+        wrist_offsets = None
+        if args.wrist_offset:
+            if args.input_mode != "controller":
+                logger_mp.warning("[wrist-offset] only applies to controller input mode; ignored")
+            else:
+                from glob import glob
+                wrist_offsets = {}
+                for side in ("left", "right"):
+                    files = sorted(glob(os.path.join(args.wrist_offset_dir, f"calib_vuer_pivot_{side}_*.npz")))
+                    if not files:
+                        raise FileNotFoundError(
+                            f"[wrist-offset] calib_vuer_pivot_{side}_*.npz not found in {args.wrist_offset_dir}")
+                    wrist_offsets[side] = np.load(files[-1])[f"p_wrist_targetray_{side}"]
+                    logger_mp.info(f"[wrist-offset] {side}: {os.path.basename(files[-1])} "
+                                   f"p={np.round(wrist_offsets[side] * 1000, 1)} mm")
+
         # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
         tv_wrapper = TeleVuerWrapper(
             use_hand_tracking=args.input_mode == "hand",
@@ -580,6 +609,7 @@ if __name__ == "__main__":
             zmq=camera_config["head_camera"]["enable_zmq"],
             webrtc=camera_config["head_camera"]["enable_webrtc"],
             webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
+            wrist_offsets=wrist_offsets,
         )
 
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)

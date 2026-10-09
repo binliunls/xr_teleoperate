@@ -1,13 +1,16 @@
-"""Fetch and verify one finalized Thor-native Sharpa capture.
+"""Fetch and verify one or all finalized Thor-native Sharpa captures.
 
-Run manually after an episode has stopped and ``sharpa_native_capture.json``
-has been finalized::
+Run manually after capture metadata has been finalized.  The input may be one
+episode or a task directory containing ``episode_<number>`` directories::
 
     python -m teleop.utils.fetch_sharpa_native_capture EPISODE_DIR
+    python -m teleop.utils.fetch_sharpa_native_capture TASK_DIR
 
 Only ``scp`` lifecycle traffic crosses the workstation link, after teleop has
 ended.  All fetched data is verified in a unique partial directory before an
-atomic rename to ``EPISODE_DIR/sharpa_native_capture``.
+atomic rename to ``EPISODE_DIR/sharpa_native_capture``.  Task-directory mode
+continues after individual failures and verifies already-fetched captures
+instead of overwriting them.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -39,6 +43,7 @@ _SCP_TARGET_RE = re.compile(
     r"^(?:[A-Za-z_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9_.-]*$"
 )
 _REMOTE_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
+_EPISODE_DIR_RE = re.compile(r"^episode_(\d+)$")
 
 
 class CaptureFetchError(RuntimeError):
@@ -553,11 +558,81 @@ def fetch_episode_capture(
             shutil.rmtree(partial_root)
 
 
+def discover_episode_directories(
+    task_dir: os.PathLike[str] | str,
+) -> tuple[Path, list[Path]]:
+    """Return direct ``episode_<number>`` children in numeric order."""
+    task = Path(task_dir)
+    if task.is_symlink() or not task.is_dir():
+        raise CaptureFetchError(f"task directory is missing or unsafe: {task}")
+    task = task.resolve(strict=True)
+    indexed_episodes = []
+    for child in task.iterdir():
+        match = _EPISODE_DIR_RE.fullmatch(child.name)
+        if match is not None:
+            indexed_episodes.append((int(match.group(1)), child.name, child))
+    if not indexed_episodes:
+        raise CaptureFetchError(
+            f"task directory has no direct episode_<number> children: {task}"
+        )
+    indexed_episodes.sort(key=lambda item: (item[0], item[1]))
+    return task, [item[2] for item in indexed_episodes]
+
+
+def _result_payload(
+    installed_path: Path,
+    result: VerificationResult,
+    *,
+    status: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "capture_id": result.capture_id,
+        "installed_path": str(installed_path),
+        "manifest_sha256": result.manifest_sha256,
+        "chunk_count": result.chunk_count,
+        "chunk_bytes": result.chunk_bytes,
+        "clock_path": result.clock_path,
+    }
+    if status is not None:
+        payload["status"] = status
+    return payload
+
+
+def _fetch_or_verify_batch_episode(
+    episode_dir: Path,
+    *,
+    thor: str,
+    allow_default_host_path: bool,
+    expected_host_root: str,
+) -> tuple[Path, VerificationResult, str]:
+    """Fetch one batch item, or verify a capture installed by an earlier run."""
+    final_path = episode_dir / FETCHED_CAPTURE_DIRNAME
+    if os.path.lexists(final_path):
+        reference = load_capture_reference(
+            episode_dir,
+            allow_default_host_path=allow_default_host_path,
+            expected_host_root=expected_host_root,
+        )
+        result = verify_capture_directory(final_path, reference.capture_id)
+        return final_path, result, "already_present"
+
+    installed_path, result = fetch_episode_capture(
+        episode_dir,
+        thor=thor,
+        allow_default_host_path=allow_default_host_path,
+        expected_host_root=expected_host_root,
+    )
+    return installed_path, result, "fetched"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Fetch and verify a finalized Thor-native Sharpa capture.",
+        description="Fetch and verify one episode, or every episode in a task directory.",
     )
-    parser.add_argument("episode_dir", help="Episode directory containing sharpa_native_capture.json")
+    parser.add_argument(
+        "episode_dir",
+        help="Episode directory, or task directory containing episode_<number> children",
+    )
     parser.add_argument(
         "--thor",
         default=DEFAULT_THOR,
@@ -580,6 +655,68 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
+
+    requested_path = Path(args.episode_dir)
+    metadata_path = requested_path / CAPTURE_METADATA_FILENAME
+    is_episode = (
+        _EPISODE_DIR_RE.fullmatch(requested_path.name) is not None
+        or os.path.lexists(metadata_path)
+    )
+    if not is_episode:
+        try:
+            task_dir, episode_dirs = discover_episode_directories(requested_path)
+        except CaptureFetchError as exc:
+            raise SystemExit(f"error: {exc}") from exc
+
+        episode_results = []
+        fetched_count = 0
+        existing_count = 0
+        failed_count = 0
+        for episode_dir in episode_dirs:
+            try:
+                installed_path, result, status = _fetch_or_verify_batch_episode(
+                    episode_dir,
+                    thor=args.thor,
+                    allow_default_host_path=args.allow_default_host_path,
+                    expected_host_root=args.expected_host_root,
+                )
+            except CaptureFetchError as exc:
+                failed_count += 1
+                episode_results.append(
+                    {
+                        "episode": episode_dir.name,
+                        "status": "error",
+                        "error": str(exc),
+                    }
+                )
+                print(f"[{episode_dir.name}] error: {exc}", file=sys.stderr)
+                continue
+
+            if status == "fetched":
+                fetched_count += 1
+            else:
+                existing_count += 1
+            payload = _result_payload(installed_path, result, status=status)
+            payload["episode"] = episode_dir.name
+            episode_results.append(payload)
+            print(f"[{episode_dir.name}] {status}: {installed_path}", file=sys.stderr)
+
+        print(
+            json.dumps(
+                {
+                    "task_dir": str(task_dir),
+                    "episode_count": len(episode_dirs),
+                    "fetched_count": fetched_count,
+                    "already_present_count": existing_count,
+                    "failed_count": failed_count,
+                    "episodes": episode_results,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 1 if failed_count else 0
+
     try:
         installed_path, result = fetch_episode_capture(
             args.episode_dir,
@@ -592,14 +729,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     print(
         json.dumps(
-            {
-                "capture_id": result.capture_id,
-                "installed_path": str(installed_path),
-                "manifest_sha256": result.manifest_sha256,
-                "chunk_count": result.chunk_count,
-                "chunk_bytes": result.chunk_bytes,
-                "clock_path": result.clock_path,
-            },
+            _result_payload(installed_path, result),
             indent=2,
             sort_keys=True,
         )

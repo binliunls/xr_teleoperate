@@ -11,7 +11,8 @@
  *   Publish    rt/sharpa/right/state HandState_ motor_state[i].q() in degrees
  *
  * Usage:
- *   ./sharpa_dds_bridge [--speed 0.5] [--state-hz 50]
+ *   ./sharpa_dds_bridge [--speed 0.5] [--state-hz 30]
+ *                       [--dds-interface enx80691a14d263]
  */
 
 #include <unitree/robot/channel/channel_factory.hpp>
@@ -42,6 +43,7 @@
 
 static constexpr int  NUM_JOINTS = 22;
 static constexpr int  CMD_HZ     = 50;   // command apply rate
+static constexpr char DEFAULT_DDS_INTERFACE[] = "enx80691a14d263";
 static constexpr char TOPIC_LEFT_CMD[]    = "rt/sharpa/left/cmd";
 static constexpr char TOPIC_RIGHT_CMD[]   = "rt/sharpa/right/cmd";
 static constexpr char TOPIC_LEFT_STATE[]  = "rt/sharpa/left/state";
@@ -356,18 +358,22 @@ static void on_signal(int) { g_running = false; }
 
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog
-              << " [--speed FLOAT] [--state-hz FLOAT] [--side left|right|both] [--tactile] [--tactile-port N]\n"
+              << " [--speed FLOAT] [--state-hz FLOAT] [--side left|right|both]"
+                 " [--dds-interface IFACE] [--tactile] [--tactile-port N]\n"
               << "  --speed FLOAT    hand speed coefficient (default: 0.5)\n"
-              << "  --state-hz FLOAT state publish rate Hz (default: 50)\n"
+              << "  --state-hz FLOAT state publish rate Hz (default: 30)\n"
               << "  --side STR       which hand(s) to bridge: left, right, or both (default: both)\n"
+              << "  --dds-interface IFACE DDS network interface (default: "
+              << DEFAULT_DDS_INTERFACE << ")\n"
               << "  --tactile        keep device-side tactile JPEG stream on (default: off; ~30 Mb/s per hand)\n"
               << "  --tactile-port N publish DEFORM+F6+CONTACT_POINT over ZMQ PUB on this port (default: 7779; 0 to disable)\n";
 }
 
 int main(int argc, char* argv[]) {
     float speed    = 0.5f;
-    float state_hz = 50.0f;
+    float state_hz = 30.0f;
     std::string side = "both";
+    std::string dds_interface = DEFAULT_DDS_INTERFACE;
     bool enable_tactile = false;
     int  tactile_port = 7779;
 
@@ -378,10 +384,16 @@ int main(int argc, char* argv[]) {
             state_hz = std::stof(argv[++i]);
         else if (!std::strcmp(argv[i], "--side") && i + 1 < argc)
             side = argv[++i];
+        else if (!std::strcmp(argv[i], "--dds-interface") && i + 1 < argc)
+            dds_interface = argv[++i];
         else if (!std::strcmp(argv[i], "--tactile"))
             enable_tactile = true;
         else if (!std::strcmp(argv[i], "--tactile-port") && i + 1 < argc)
             tactile_port = std::stoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
+            print_usage(argv[0]);
+            return 0;
+        }
         else { print_usage(argv[0]); return 1; }
     }
 
@@ -395,7 +407,10 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT,  on_signal);
     std::signal(SIGTERM, on_signal);
 
-    ChannelFactory::Instance()->Init(0);
+    // Bind only DDS to the workstation link. Sharpa SDK hand traffic remains
+    // independently routed over the existing 192.168.124.x interfaces.
+    std::cout << "[dds] domain=0 interface=" << dds_interface << "\n";
+    ChannelFactory::Instance()->Init(0, dds_interface);
 
     // Bring up the tactile ZMQ publisher BEFORE connecting hands so that the
     // per-hand callback registration (inside connect_hand) sees a live socket.

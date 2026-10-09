@@ -1,0 +1,59 @@
+diff --git a/src/televuer/tv_wrapper.py b/src/televuer/tv_wrapper.py
+index 3177215..f25d37a 100644
+--- a/src/televuer/tv_wrapper.py
++++ b/src/televuer/tv_wrapper.py
+@@ -194,8 +194,9 @@ class TeleData:
+ 
+ class TeleVuerWrapper:
+     def __init__(self, use_hand_tracking: bool, binocular: bool=True, img_shape: tuple=(480, 1280), display_fps: float=30.0,
+-                       display_mode: Literal["immersive", "pass-through", "ego"]="immersive", zmq: bool=False, webrtc: bool=False, webrtc_url: str=None, 
+-                       cert_file: str=None, key_file: str=None, return_hand_rot_data: bool=False):
++                       display_mode: Literal["immersive", "pass-through", "ego"]="immersive", zmq: bool=False, webrtc: bool=False, webrtc_url: str=None,
++                       cert_file: str=None, key_file: str=None, return_hand_rot_data: bool=False,
++                       wrist_offsets: dict=None):
+         """
+         TeleVuerWrapper is a wrapper for the TeleVuer class, which handles XR device's data suit for robot control.
+         It initializes the TeleVuer instance with the specified parameters and provides a method to get motion state data.
+@@ -211,6 +212,12 @@ class TeleVuerWrapper:
+         :param webrtc_url: str, URL for the webrtc offer. must be provided if webrtc is True.
+         :param cert_file: str, path to the SSL certificate file.
+         :param key_file: str, path to the SSL key file.
++        :param wrist_offsets: dict or None. Optional {"left": (3,), "right": (3,)} translations
++            (meters, expressed in the controller's targetRay frame) from the targetRay origin to
++            the operator's wrist pivot, from pivot calibration (calib_vuer_pivot_*.npz).
++            When set, controller-tracking wrist positions track the operator's anatomical wrist
++            point instead of the controller origin (orientation unchanged). Ignored in
++            hand-tracking mode.
+ 
+         Note:
+ 
+@@ -235,6 +242,12 @@ class TeleVuerWrapper:
+         """
+         self.use_hand_tracking = use_hand_tracking
+         self.return_hand_rot_data = return_hand_rot_data
++        self.wrist_offsets = None
++        if wrist_offsets is not None:
++            self.wrist_offsets = {
++                side: np.asarray(wrist_offsets[side], dtype=np.float64).reshape(3)
++                for side in ("left", "right")
++            }
+         self.tvuer = TeleVuer(use_hand_tracking=use_hand_tracking, binocular=binocular, img_shape=img_shape, display_fps=display_fps,
+                               display_mode=display_mode, zmq=zmq, webrtc=webrtc, webrtc_url=webrtc_url, 
+                               cert_file=cert_file, key_file=key_file)
+@@ -386,6 +399,16 @@ class TeleVuerWrapper:
+             left_IPunitree_Bxr_world_arm, left_arm_is_valid  = safe_mat_update(CONST_LEFT_ARM_POSE, self.tvuer.left_arm_pose)
+             right_IPunitree_Bxr_world_arm, right_arm_is_valid = safe_mat_update(CONST_RIGHT_ARM_POSE, self.tvuer.right_arm_pose)
+ 
++            # Calibrated wrist offset (translation only): move the tracked point from the
++            # controller's targetRay origin to the operator's wrist pivot, so that pure wrist
++            # rotations no longer translate the commanded position (lever-arm effect).
++            # Must be applied on the raw pose, before the basis change below.
++            if self.wrist_offsets is not None:
++                if left_arm_is_valid:
++                    left_IPunitree_Bxr_world_arm[0:3, 3] += left_IPunitree_Bxr_world_arm[0:3, 0:3] @ self.wrist_offsets["left"]
++                if right_arm_is_valid:
++                    right_IPunitree_Bxr_world_arm[0:3, 3] += right_IPunitree_Bxr_world_arm[0:3, 0:3] @ self.wrist_offsets["right"]
++
+             # Change basis convention
+             Brobot_world_head = T_ROBOT_OPENXR @ Bxr_world_head @ T_OPENXR_ROBOT
+             left_IPunitree_Brobot_world_arm  = T_ROBOT_OPENXR @ left_IPunitree_Bxr_world_arm @ T_OPENXR_ROBOT

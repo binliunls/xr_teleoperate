@@ -22,6 +22,11 @@ INSTALL_DIR=/opt/sharpa-dds-bridge
 UNIT=/etc/systemd/system/sharpa_dds_bridge.service
 ENV_FILE=/etc/default/sharpa-dds-bridge
 
+# Re-exec under sudo before parsing, since parsing shifts the arguments away.
+if [[ $EUID -ne 0 ]]; then
+    exec sudo "$0" "$@"
+fi
+
 BRIDGE="" SDK_LIB="" START=1 UNINSTALL=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,10 +38,6 @@ while [[ $# -gt 0 ]]; do
         *) echo "ERROR: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
-
-if [[ $EUID -ne 0 ]]; then
-    exec sudo "$0" "$@"
-fi
 
 if (( UNINSTALL )); then
     systemctl disable --now sharpa_dds_bridge.service 2>/dev/null || true

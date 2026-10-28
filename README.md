@@ -36,11 +36,12 @@
 
 # 🔖[Release Note](CHANGELOG.md)
 
-## 🏷️ v1.5 (2025.12.29)
+## 🏷️ v1.6 (2026.7.29)
 
-- support simulation
-- add CycloneDDS interface name parameter
-- [add caching to speed-up urdf loading](https://github.com/unitreerobotics/xr_teleoperate/commit/6cab654620735bfa347c1cd32a0d8c0c1e6ec343)
+- support **H2** robot
+- support **R1** robot (`R1_A5` / `R1_A7`)
+- add **BrainCo** hand controller-input support
+- use head-yaw-relative arm reference by default
 - ...
 
 
@@ -69,31 +70,43 @@ The currently supported devices in this repository:
     <th align="center">⚪ Status</th>
   </tr>
   <tr>
-    <td align="center"><a href="https://www.unitree.com/cn/g1" target="_blank">G1 (29 DoF)</a></td>
+    <td align="center"><a href="https://www.unitree.com/g1" target="_blank">G1 (29 DoF)</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://www.unitree.com/cn/g1" target="_blank">G1 (23 DoF)</a></td>
+    <td align="center"><a href="https://www.unitree.com/g1" target="_blank">G1 (23 DoF)</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://www.unitree.com/cn/h1" target="_blank">H1 (4‑DoF arm)</a></td>
+    <td align="center"><a href="https://www.unitree.com/h1" target="_blank">H1 (4‑DoF arm)</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://www.unitree.com/cn/h1" target="_blank">H1_2 (7‑DoF arm)</a></td>
+    <td align="center"><a href="https://www.unitree.com/h1" target="_blank">H1_2 (7‑DoF arm)</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://www.unitree.com/cn/Dex1-1" target="_blank">Dex1‑1 gripper</a></td>
+    <td align="center"><a href="https://www.unitree.com/h2" target="_blank">H2 (7‑DoF arm)</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://www.unitree.com/cn/Dex3-1" target="_blank">Dex3‑1 dexterous hand</a></td>
+    <td align="center"><a href="https://www.unitree.com/R1" target="_blank">R1 (5‑DoF arm)</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://support.unitree.com/home/zh/G1_developer/inspire_dfx_dexterous_hand" target="_blank">Inspire dexterous hand</a></td>
+    <td align="center"><a href="https://www.unitree.com/R1" target="_blank">R1 (7‑DoF arm)</a></td>
+    <td align="center">✅ Complete</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://www.unitree.com/Dex1-1" target="_blank">Dex1‑1 gripper</a></td>
+    <td align="center">✅ Complete</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://www.unitree.com/Dex3-1" target="_blank">Dex3‑1 dexterous hand</a></td>
+    <td align="center">✅ Complete</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://support.unitree.com/home/en/G1_developer/inspire_dfx_dexterous_hand" target="_blank">Inspire dexterous hand</a></td>
     <td align="center">✅ Complete</td>
   </tr>
   <tr>
@@ -211,8 +224,8 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 |     `--frequency`     |            Set the FPS for recording and control             |                  Any reasonable float value                  |       30.0        |
 |    `--input-mode`     |       Choose XR input mode (how to control the robot)        |   `hand` (hand tracking)`controller` (controller tracking)   |      `hand`       |
 |   `--display-mode`    |  Choose XR display mode (how to view the robot perspective)  | `immersive` (immersive)`ego` (pass-through + small first-person window)`pass-through` (pass-through only) |    `immersive`    |
-|        `--arm`        |      Select the robot arm type (see 0. 📖 Introduction)       |                 `G1_29` `G1_23` `H1_2` `H1`                  |      `G1_29`      |
-|        `--ee`         | Select the end-effector type of the arm (see 0. 📖 Introduction) |     `dex1` `dex3` `inspire_ftp` `inspire_dfx` `brainco`      |       None        |
+|        `--arm`        |      Select the robot arm type (see 0. 📖 Introduction)       | `G1_29` `G1_23` `H1_2` `H1` `H2` `R1_A5` `R1_A7` |      `G1_29`      |
+|        `--ee`         | Select the end-effector type of the arm (see 0. 📖 Introduction) | `dex1` `dex1_internal` `dex3` `inspire_ftp` `inspire_dfx` `brainco` |       None        |
 |   `--img-server-ip`   | Set the image server IP address for receiving image streams and configuring WebRTC signaling |                        `IPv4` address                        | `192.168.123.164` |
 | `--network-interface` |    Set the network interface for CycloneDDS communication    |                    Network Interface Name                    |      `None`       |
 
@@ -224,9 +237,12 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 | `--headless` | **Enable headless mode** For running the program on devices without a display, e.g., the Development Computing Unit (PC2). |
 |   `--sim`    | **Enable [simulation mode](https://github.com/unitreerobotics/unitree_sim_isaaclab)** |
 |   `--ipc`    | **Inter-process communication mode** Allows controlling the xr_teleoperate program’s state via IPC. Suitable for interaction with agent programs. |
-| `--affinity` | **CPU affinity mode** Set CPU core affinity. If you are unsure what this is, do not set it. |
 |  `--record`  | **Enable data recording mode** Press **r** to start teleoperation, then **s** to start recording; press **s** again to stop and save the episode. Press **s** repeatedly to repeat the process. |
-|  `--task-*`  | Configure the save path, target, description, and steps of the recorded task. |
+| `--task-dir` | Path to save recorded data. Default: `./utils/data/` |
+| `--task-name` | Task file name for recording. Default: `pick cube` |
+| `--task-goal` | Task goal recorded in the json file. Default: `pick up cube.` |
+| `--task-desc` | Task description recorded in the json file. Default: `task description` |
+| `--task-steps` | Task steps recorded in the json file. Default: `step1: do this; step2: do that;` |
 
 ## 1.4 🔄 State Transition Diagram
 
@@ -269,7 +285,7 @@ Assuming hand tracking with G1(29 DoF) + Dex3 in simulation with recording:
 
 ```bash
 (tv) unitree@Host:~$ cd ~/xr_teleoperate/teleop/
-(tv) unitree@Host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --xr-mode=hand --arm=G1_29 --ee=dex3 --sim --record
+(tv) unitree@Host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --input-mode=hand --arm=G1_29 --ee=dex3 --sim --record
 # Simplified (defaults apply):
 (tv) unitree@Host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --ee=dex3 --sim --record
 ```
@@ -308,7 +324,9 @@ Use `https://vuer.ai?ws=wss://192.168.123.2:8012` for PICO if the websocket conn
 
    > **Note 1**: This IP must match your **Host** IP (check with `ifconfig`).
    >
-   > **Note 2**: You may see a warning page. Click **Advanced**, then **Proceed to IP (unsafe)**.
+   > **Note 2**: Use `https://vuer.ai?ws=wss://192.168.123.2:8012` for PICO if the websocket connection cannot be set.
+   >
+   > **Note 3**: You may see a warning page. Click **Advanced**, then **Proceed to IP (unsafe)**.
 
    <p align="center">
      <a href="https://oss-global-cdn.unitree.com/static/cef18751ca6643b683bfbea35fed8e7c_1279x1002.png">
@@ -442,6 +460,8 @@ Please refer to the [Repo README](https://github.com/unitreerobotics/brainco_han
 ## 3.4 ✋ Unitree Dex1_1 Service (Optional)
 
 Please refer to the [Repo README](https://github.com/unitreerobotics/dex1_1_service) for setup instructions.
+
+For a G1-29 equipped with internally wired Dex1 grippers, use `--arm G1_29 --ee dex1_internal`. This mode controls the left and right grippers through motor indices 31 and 33 in the G1 low-level command, so there is no need to start the external Dex1 service. Whether the internally wired grippers can be controlled through `rt/arm_sdk` has not yet been verified; therefore, using `--motion` at the same time is currently unsupported.
 
 ## 3.5 🚀 Launch
 

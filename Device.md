@@ -41,7 +41,7 @@
     <td style="text-align: center;">1</td>
     <td style="text-align: center;">Recommended x86-64 architecture</td>
     <td style="text-align: center;">
-      For simulation mode, please follow 
+      For simulation mode, please follow
       <a href="https://docs.isaacsim.omniverse.nvidia.com/4.5.0/installation/requirements.html">NVIDIA official hardware recommendations</a>
       for deployment.
     </td>
@@ -173,13 +173,11 @@
 
 ### 5.2.3 G1 Wrist RealSense D405
 
-> RealSense D405 is recommended only for [Unitree Dex3-1](https://www.unitree.com/Dex3-1) end-effector use.
-
 - Materials
 
 |      Item      | Quantity |                        Specification                         |                           Remarks                            |
 | :------------: | :------: | :----------------------------------------------------------: | :----------------------------------------------------------: |
-| RealSense D405 |    2     | [Website](https://www.intelrealsense.com/depth-camera-d405/) | For G1 robot wrist (M4010 motors) left & right perspectives  |
+| RealSense D405 |    2     | [Website](https://www.intelrealsense.com/depth-camera-d405/) |       For G1 robot left and right wrist perspectives         |
 |   USB3.0 Hub   |    1     | [Issue](https://github.com/IntelRealSense/librealsense/issues/24) | Choose a high-quality hub; recommended to connect to [Type-C #9](https://support.unitree.com/home/en/G1_developer/about_G1) |
 |  M3-1 Hex Nut  |    4     |             [Reference](https://a.co/d/gQaLtHD)              |                     For wrist fastening                      |
 |  M3x12 Screw   |    4     |           [Reference](https://amzn.asia/d/aU9NHSf)           |                     For wrist fastening                      |
@@ -189,9 +187,10 @@
 
 |           Item           | Quantity |            Remarks             |                        Download Link                         |
 | :----------------------: | :------: | :----------------------------: | :----------------------------------------------------------: |
-|     D405 Wrist Ring      |    2     |  To be used with wrist bracket   | [📥 STEP](https://github.com/unitreerobotics/xr_teleoperate/blob/7cd188c1657ad4df97cfcd44e9f35bac937f7f2b/hardware/left_wrist_D405_camera_mount.STEP) |
-| Left Wrist Camera Bracket  |    1     | For mounting left D405 camera  | [📥 STEP](https://github.com/unitreerobotics/xr_teleoperate/blob/7cd188c1657ad4df97cfcd44e9f35bac937f7f2b/hardware/right_wrist_D405_camera_mount.STEP) |
-| Right Wrist Camera Bracket |    1     | For mounting right D405 camera | [📥 STEP](https://github.com/unitreerobotics/xr_teleoperate/blob/7cd188c1657ad4df97cfcd44e9f35bac937f7f2b/hardware/wrist_ring_mount.STEP) |
+| D405 Wrist Ring Dex3-1 Bracket |    2     | To be used with the wrist camera bracket (M4010 wrist motor) | [📥 STEP](https://github.com/unitreerobotics/xr_teleoperate/blob/7cd188c1657ad4df97cfcd44e9f35bac937f7f2b/hardware/left_wrist_D405_camera_mount.STEP) |
+| Left Wrist Camera Dex3-1 Bracket (M4010 wrist motor) |    1     | For mounting the left wrist D405 camera  | [📥 STEP](https://github.com/unitreerobotics/xr_teleoperate/blob/7cd188c1657ad4df97cfcd44e9f35bac937f7f2b/hardware/right_wrist_D405_camera_mount.STEP) |
+| Right Wrist Camera Dex3-1 Bracket (M4010 wrist motor) |    1     | For mounting the right wrist D405 camera | [📥 STEP](https://github.com/unitreerobotics/xr_teleoperate/blob/7cd188c1657ad4df97cfcd44e9f35bac937f7f2b/hardware/wrist_ring_mount.STEP) |
+| D405 Camera Dex1-1 Bracket |    1     | For mounting the Dex1-1 D405 camera | [📥 STEP](https://drive.google.com/file/d/1YmQHXSf-elHDRNwJMGQlAI7aqd9TGmN5/view?usp=sharing) |
 
 ### 5.2.4 G1 Wrist Monocular Camera
 

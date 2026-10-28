@@ -75,8 +75,6 @@ def main():
     user_input = input("Please enter 's' to start moving the arms (Ctrl+C to stop): \n")
     if user_input.lower() == "s":
         step = 0
-        if arm_ctrl:
-            arm_ctrl.speed_gradual_max()
 
         try:
             while True:

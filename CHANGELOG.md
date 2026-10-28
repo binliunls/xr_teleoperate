@@ -1,5 +1,18 @@
 # 🔖 Release Note
 
+## 🏷️ v1.6 (2026.7.29)
+
+- Added support for the **H2** robot.
+- Added support for the **R1** robot (`R1_A5` 5-DoF arm and `R1_A7` 7-DoF arm).
+- Added **BrainCo** dexterous hand controller-input support.
+- Use **head-yaw-relative arm reference** by default, keeping wrist targets expressed relative to the operator's yaw direction while ignoring head pitch and roll (the previous translation-only behavior is still available).
+
+------
+
+- Fixed the Dex3 retargeting bug.
+- Fixed the Dex1 gripper close bug in controller-input mode.
+- Fixed color format (BGR) for non-binocular head camera recording.
+
 ## 🏷️ v1.5 (2025.12.29)
 
 - support simulation mode
@@ -77,5 +90,5 @@
 2. Supported robot included: `G1_29`, `G1_23`, `H1_2`, and `H1`.
 3. Supported end-effectors included: `dex3`, `dex1(gripper)`, and `inspire1`.
 4. Only supported **hand tracking mode** for XR devices (using [Vuer](https://github.com/vuer-ai/vuer) version **v0.0.32RC7**).
-   **Controller tracking mode** was **not** supported. 
+   **Controller tracking mode** was **not** supported.
 5. Data recording mode was available.

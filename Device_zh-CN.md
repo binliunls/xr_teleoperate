@@ -43,7 +43,7 @@
     <td style="text-align: center;">1</td>
     <td style="text-align: center;">推荐 x86-64 架构</td>
     <td style="text-align: center;">
-      仿真模式下请使用 
+      仿真模式下请使用
       <a href="https://docs.isaacsim.omniverse.nvidia.com/4.5.0/installation/requirements.html"> NVIDIA 官方推荐</a>
       的硬件资源进行部署使用
     </td>
@@ -175,13 +175,11 @@
 
 ### 5.2.3 G1 腕部 RealSense D405
 
->  RealSense D405 仅推荐 [Unitree Dex3-1](https://www.unitree.com/Dex3-1) 末端执行器使用
-
 - 物料
 
 |        项目         | 数量 |                             规格                             |                             备注                             |
 | :-----------------: | :--: | :----------------------------------------------------------: | :----------------------------------------------------------: |
-| RealSense D405 相机 |  2   | [Website](https://www.intelrealsense.com/depth-camera-d405/) |          用于G1机器人（M4010腕部电机）左右腕部视角           |
+| RealSense D405 相机 |  2   | [Website](https://www.intelrealsense.com/depth-camera-d405/) |          用于G1机器人左右腕部视角           |
 |     USB3.0 Hub      |  1   | [Issue](https://github.com/IntelRealSense/librealsense/issues/24) | 注意选用优质Hub以满足realsense相机需求；<br />推荐连接至 [9号Type-C接口](https://support.unitree.com/home/en/G1_developer/about_G1) |
 |    M3-1 六角螺母    |  4   |              [仅供参考](https://a.co/d/gQaLtHD)              |                         用于紧固腕部                         |
 |     M3x12 螺钉      |  4   |           [仅供参考](https://amzn.asia/d/aU9NHSf)            |                         用于紧固腕部                         |
@@ -191,9 +189,11 @@
 
 |       项目        | 数量 |          备注          |                           下载链接                           |
 | :---------------: | :--: | :--------------------: | :----------------------------------------------------------: |
-| D405 相机腕圈支架 |  2   | 与腕部相机支架搭配使用 | [📥 STEP](https://github.com/unitreerobotics/xr_teleoperate/blob/7cd188c1657ad4df97cfcd44e9f35bac937f7f2b/hardware/left_wrist_D405_camera_mount.STEP) |
-|   左腕相机支架    |  1   |  用于装配左腕D405相机  | [📥 STEP](https://github.com/unitreerobotics/xr_teleoperate/blob/7cd188c1657ad4df97cfcd44e9f35bac937f7f2b/hardware/right_wrist_D405_camera_mount.STEP) |
-|   右腕相机支架    |  1   |  用于装配右腕D405相机  | [📥 STEP](https://github.com/unitreerobotics/xr_teleoperate/blob/7cd188c1657ad4df97cfcd44e9f35bac937f7f2b/hardware/wrist_ring_mount.STEP) |
+| D405 相机腕圈 Dex3-1 支架 |  2   | 与（M4010腕部电机）腕部相机支架搭配使用 | [📥 STEP](https://github.com/unitreerobotics/xr_teleoperate/blob/7cd188c1657ad4df97cfcd44e9f35bac937f7f2b/hardware/left_wrist_D405_camera_mount.STEP) |
+|   （M4010腕部电机）左腕相机 Dex3-1 支架    |  1   |  用于装配左腕D405相机  | [📥 STEP](https://github.com/unitreerobotics/xr_teleoperate/blob/7cd188c1657ad4df97cfcd44e9f35bac937f7f2b/hardware/right_wrist_D405_camera_mount.STEP) |
+|   （M4010腕部电机）右腕相机 Dex3-1 支架    |  1   |  用于装配右腕D405相机  | [📥 STEP](https://github.com/unitreerobotics/xr_teleoperate/blob/7cd188c1657ad4df97cfcd44e9f35bac937f7f2b/hardware/wrist_ring_mount.STEP) |
+|   D405相机 Dex1-1 支架    |  1   |  用于装配 Dex1-1 的 D405 相机  | [📥 STEP](https://drive.google.com/file/d/1YmQHXSf-elHDRNwJMGQlAI7aqd9TGmN5/view?usp=sharing) |
+
 
 ### 5.2.4 G1 腕部单目相机
 

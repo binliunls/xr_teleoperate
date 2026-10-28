@@ -1,0 +1,26 @@
+# systemd unit for the Sharpa hand DDS bridge (runs on Thor).
+# Installed by install_sharpa_dds_bridge_service.sh as
+# /etc/systemd/system/sharpa_dds_bridge.service.
+# Settings (side, speed, state rate) live in /etc/default/sharpa-dds-bridge.
+#
+# NOTE: on start and stop the bridge commands all joints to position 0, so
+# the hands move to their zero pose whenever this service starts or stops.
+[Unit]
+Description=Sharpa hand DDS bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=unitree
+EnvironmentFile=-/etc/default/sharpa-dds-bridge
+ExecStart=/opt/sharpa-dds-bridge/sharpa_dds_bridge_run.sh
+# The bridge exits with an error if no hand is found within its 300 s discovery
+# window; retry so it recovers when a hand is powered on later.
+Restart=on-failure
+RestartSec=5
+# Shutdown returns the hands to zero (and waits 0.5 s) before exiting.
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

@@ -1256,6 +1256,14 @@ class H2_ArmController:
         self._gradual_start_time = None
         self._gradual_time = None
 
+        # Optional gravity feedforward evaluated on the rate-limited command
+        # every tick. None keeps the original tau = tauff_target path.
+        self._gravity_fn = None
+        self._gravity_tau_limit = None
+        self._gravity_ramp_s = 0.0
+        self._gravity_start_time = None
+        self._gravity_tau = np.zeros(14)
+
         if self.motion_mode:
             self.lowcmd_publisher = ChannelPublisher(kTopicLowCommand_Motion, hg_LowCmd)
         else:
@@ -1378,6 +1386,7 @@ class H2_ArmController:
                 arm_q_target = self.q_target
                 arm_tauff_target = self.tauff_target
                 head_q = self.head_q_target.copy()
+                gravity_fn = self._gravity_fn
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -1385,6 +1394,11 @@ class H2_ArmController:
             else:
                 cliped_arm_q_target = self.clip_arm_q_target(arm_q_target, velocity_limit=self.arm_velocity_limit)
                 clipped_head_q = self.clip_head_q_target(head_q)
+
+            if gravity_fn is not None:
+                arm_tauff_target = arm_tauff_target + self._gravity_feedforward(
+                    gravity_fn, cliped_arm_q_target, start_time
+                )
 
             if self.motion_mode:
                 self.msg.motor_cmd[H2_JointIndex.kNotUsedJoint0].q = 1.0
@@ -1439,6 +1453,53 @@ class H2_ArmController:
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+
+    def enable_gravity_compensation(self, gravity_fn, tau_limit, ramp_s=2.0):
+        """Add clip(gravity_fn(q_cmd), +-tau_limit) to the arm tau every control tick.
+
+        q_cmd is the rate-limited 14-DoF arm command actually published this
+        tick, ordered as H2_JointArmIndex. The feedforward ramps linearly from
+        0 to full over ramp_s seconds. Any invalid output disables it for the
+        rest of the run (tau falls back to tauff_target alone).
+        """
+        tau_limit = np.asarray(tau_limit, dtype=np.float64).reshape(-1)
+        if tau_limit.shape != (14,) or not np.all(np.isfinite(tau_limit)) or np.any(tau_limit <= 0):
+            raise ValueError(f"tau_limit must be 14 positive finite values, got {tau_limit}")
+        probe = np.asarray(gravity_fn(self.get_current_dual_arm_q()), dtype=np.float64)
+        if probe.shape != (14,) or not np.all(np.isfinite(probe)):
+            raise ValueError(f"gravity_fn returned invalid output {probe!r}")
+        with self.ctrl_lock:
+            self._gravity_tau_limit = tau_limit
+            self._gravity_ramp_s = max(0.0, float(ramp_s))
+            self._gravity_start_time = time.time()
+            self._gravity_fn = gravity_fn
+        logger_mp.info(
+            f"[H2_ArmController] gravity compensation enabled (ramp {self._gravity_ramp_s:.1f}s, "
+            f"|tau| limit {np.round(tau_limit, 1).tolist()} Nm)"
+        )
+
+    def _gravity_feedforward(self, gravity_fn, q_cmd, now):
+        try:
+            tau = np.asarray(gravity_fn(q_cmd), dtype=np.float64).reshape(-1)
+            if tau.shape != (14,) or not np.all(np.isfinite(tau)):
+                raise ValueError(f"invalid gravity torque {tau!r}")
+        except Exception as exc:
+            with self.ctrl_lock:
+                self._gravity_fn = None
+            self._gravity_tau = np.zeros(14)
+            logger_mp.critical(
+                f"[H2_ArmController] gravity compensation DISABLED after error: {exc}"
+            )
+            return self._gravity_tau
+        tau = np.clip(tau, -self._gravity_tau_limit, self._gravity_tau_limit)
+        if self._gravity_ramp_s > 0.0:
+            tau = tau * min(1.0, (now - self._gravity_start_time) / self._gravity_ramp_s)
+        self._gravity_tau = tau
+        return tau
+
+    def get_gravity_tau(self):
+        """Gravity feedforward (Nm, 14 arm joints) applied on the latest tick."""
+        return self._gravity_tau.copy()
 
     def get_mode_machine(self):
         """Return current dds mode machine."""

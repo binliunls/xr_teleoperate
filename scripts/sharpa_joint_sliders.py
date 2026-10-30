@@ -16,8 +16,8 @@ Usage:
     python scripts/sharpa_joint_sliders.py [--side left|right|both]
                                            [--interface eno2] [--domain 0] [--check]
 
---interface defaults to the interface that holds a 192.168.124.x address (the hand
-network), matching the bridge service. --check prints the state rate for each hand
+--interface defaults to the interface that holds a 192.168.123.x address (the robot's
+DDS network, which the bridge service publishes on), else one with a 192.168.124.x address. --check prints the state rate for each hand
 without opening a window and sends nothing.
 
 Slider ranges are the test ranges from the Sharpa SDK sample (sharpa_wave_example.py),
@@ -38,7 +38,8 @@ from unitree_sdk2py.core.channel import ChannelFactoryInitialize  # noqa: E402
 
 from teleop.robot_control.robot_hand_sharpa_dds import NUM_JOINTS, SharpaHandDDSClient  # noqa: E402
 
-HAND_NET_PREFIX = "192.168.124."
+# Robot DDS network first (what the bridge service pins to), then the hand network.
+DDS_NET_PREFIXES = ("192.168.123.", "192.168.124.")
 SEND_HZ = 30
 UI_MS = 50
 
@@ -70,13 +71,14 @@ JOINTS = [
 assert len(JOINTS) == NUM_JOINTS
 
 
-def detect_interface(prefix=HAND_NET_PREFIX):
-    """Name of the interface that holds an IPv4 address starting with prefix."""
+def detect_interface(prefixes=DDS_NET_PREFIXES):
+    """Name of the first interface holding an IPv4 address that starts with one of prefixes."""
     out = subprocess.run(["ip", "-o", "-4", "addr"], capture_output=True, text=True).stdout
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) > 3 and parts[3].startswith(prefix):
-            return parts[1]
+    for prefix in prefixes:
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) > 3 and parts[3].startswith(prefix):
+                return parts[1]
     return None
 
 
@@ -226,7 +228,9 @@ def main():
     ap = argparse.ArgumentParser(description="Slider GUI for the Sharpa hands via the DDS bridge.")
     ap.add_argument("--side", choices=["left", "right", "both"], default="both")
     ap.add_argument(
-        "--interface", default=None, help=f"DDS network interface (default: the one with a {HAND_NET_PREFIX}x address)"
+        "--interface",
+        default=None,
+        help="DDS network interface (default: the one with a 192.168.123.x address, else 192.168.124.x)",
     )
     ap.add_argument("--domain", type=int, default=0, help="DDS domain id (must match the bridge; default 0)")
     ap.add_argument(
@@ -238,7 +242,7 @@ def main():
     if iface:
         print(f"DDS interface: {iface}")
     else:
-        print(f"WARNING: no interface with a {HAND_NET_PREFIX}x address; using the DDS default", file=sys.stderr)
+        print("WARNING: no interface on 192.168.123.x or 192.168.124.x; using the DDS default", file=sys.stderr)
     ChannelFactoryInitialize(args.domain, iface)
 
     sides = ["left", "right"] if args.side == "both" else [args.side]

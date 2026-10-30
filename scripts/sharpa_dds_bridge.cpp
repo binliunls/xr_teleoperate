@@ -10,6 +10,13 @@
  *   Publish    rt/sharpa/left/state  HandState_ motor_state[i].q() in degrees
  *   Publish    rt/sharpa/right/state HandState_ motor_state[i].q() in degrees
  *
+ * Control mode (optional): motor_cmd[0].mode() selects the hand's control mode with the Sharpa
+ * ControlMode ids: 13 = POSITION (default), 10 = ZERO_FORCE (fingers limp, movable by hand).
+ * 0 (what older clients send) leaves the mode unchanged. In ZERO_FORCE the bridge keeps the
+ * last targets but does not send them; a switch back to POSITION resumes with the targets of the
+ * message that requested it, so clients send the measured pose there to avoid a jump. The current
+ * mode is reported back in motor_state[i].mode() of every state message.
+ *
  * Usage:
  *   ./sharpa_dds_bridge [--speed 0.5] [--state-hz 50]
  */
@@ -38,6 +45,9 @@
 
 static constexpr int  NUM_JOINTS = 22;
 static constexpr int  CMD_HZ     = 50;   // command apply rate
+static constexpr int  MODE_UNCHANGED  = 0;    // legacy clients: leave the control mode as it is
+static constexpr int  MODE_ZERO_FORCE = 10;   // sharpa::ControlMode::ZERO_FORCE
+static constexpr int  MODE_POSITION   = 13;   // sharpa::ControlMode::POSITION
 static constexpr char TOPIC_LEFT_CMD[]    = "rt/sharpa/left/cmd";
 static constexpr char TOPIC_RIGHT_CMD[]   = "rt/sharpa/right/cmd";
 static constexpr char TOPIC_LEFT_STATE[]  = "rt/sharpa/left/state";
@@ -89,20 +99,43 @@ private:
         std::vector<float> pos(NUM_JOINTS, 0.0f);
         int n = std::min(static_cast<int>(msg->motor_cmd().size()), NUM_JOINTS);
         for (int i = 0; i < n; ++i) pos[i] = msg->motor_cmd()[i].q();
+        const int mode = static_cast<int>(msg->motor_cmd()[0].mode());
         std::lock_guard<std::mutex> lk(cmd_mutex_);
         cmd_positions_ = std::move(pos);
+        if (mode == MODE_POSITION || mode == MODE_ZERO_FORCE)
+            requested_mode_ = mode;                 // MODE_UNCHANGED and anything else: keep the current mode
+    }
+
+    // Apply a requested control-mode change (called from cmd_loop, outside the command mutex).
+    void apply_mode(int want) {
+        if (want == current_mode_) return;
+        const auto cm = (want == MODE_ZERO_FORCE) ? sharpa::ControlMode::ZERO_FORCE : sharpa::ControlMode::POSITION;
+        auto err = hand_.set_control_mode(cm);
+        if (err.code != 0) {
+            std::cerr << "[" << side_ << "] set_control_mode(" << want << "): " << err.message << "\n";
+            std::lock_guard<std::mutex> lk(cmd_mutex_);
+            requested_mode_ = current_mode_;        // give up on this request; the client sees the old mode in the state
+            return;
+        }
+        current_mode_ = want;
+        std::cout << "[" << side_ << "] control mode -> " << (want == MODE_ZERO_FORCE ? "ZERO_FORCE" : "POSITION") << "\n";
     }
 
     void cmd_loop() {
         while (running_) {
             std::vector<float> pos;
+            int want;
             {
                 std::lock_guard<std::mutex> lk(cmd_mutex_);
                 pos = cmd_positions_;
+                want = requested_mode_;
             }
-            auto err = hand_.set_joint_position(pos, false);
-            if (err.code != 0)
-                std::cerr << "[" << side_ << "] set_joint_position: " << err.message << "\n";
+            apply_mode(want);
+            if (current_mode_ == MODE_POSITION) {    // in ZERO_FORCE the targets are kept but not sent
+                auto err = hand_.set_joint_position(pos, false);
+                if (err.code != 0)
+                    std::cerr << "[" << side_ << "] set_joint_position: " << err.message << "\n";
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1000 / CMD_HZ));
         }
     }
@@ -114,6 +147,8 @@ private:
                 HandState_ msg;
                 std::vector<MotorState_> states(NUM_JOINTS);
                 int n = std::min(static_cast<int>(angles_deg.size()), NUM_JOINTS);
+                const uint8_t mode = static_cast<uint8_t>(current_mode_.load());
+                for (int i = 0; i < NUM_JOINTS; ++i) states[i].mode(mode);   // current control mode, every joint
                 for (int i = 0; i < n; ++i) states[i].q(angles_deg[i]);
                 msg.motor_state(states);
                 pub_->Write(msg);
@@ -122,12 +157,19 @@ private:
         }
     }
 
+public:
+    /** Back to POSITION mode (used before the shutdown zeroing). */
+    void restore_position_mode() { apply_mode(MODE_POSITION); }
+
+private:
     std::string side_;
     sharpa::SharpaWave& hand_;
     int state_dt_ms_;
 
     std::mutex cmd_mutex_;
     std::vector<float> cmd_positions_;
+    int requested_mode_{MODE_POSITION};             // guarded by cmd_mutex_
+    std::atomic<int> current_mode_{MODE_POSITION};  // connect_hand() set POSITION before the bridge started
     std::atomic<bool> running_{false};
 
     std::unique_ptr<ChannelPublisher<HandState_>> pub_;
@@ -296,8 +338,8 @@ int main(int argc, char* argv[]) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
 
     std::cout << "\nShutting down...\n";
-    if (left_bridge)  left_bridge->stop();
-    if (right_bridge) right_bridge->stop();
+    if (left_bridge)  { left_bridge->stop();  left_bridge->restore_position_mode(); }   // a limp hand must be servoed to go to zero
+    if (right_bridge) { right_bridge->stop(); right_bridge->restore_position_mode(); }
 
     disconnect_hand(left_hand,  "left");
     disconnect_hand(right_hand, "right");

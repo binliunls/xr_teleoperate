@@ -6,7 +6,7 @@ and how to set the whole chain up from a fresh robot image.
 ## 1. Architecture
 
 ```
- Workstation (eno2 192.168.124.120)            Thor (br1 192.168.124.163)             Hands
+ Workstation (on 192.168.123.x)             Thor (br0 192.168.123.163 | br1 192.168.124.163)       Hands (192.168.124.x)
 ┌──────────────────────────────┐   DDS     ┌────────────────────────────┐   Sharpa SDK   ┌────────────────┐
 │ sharpa_joint_sliders.py      │ domain 0  │ sharpa_dds_bridge          │  TCP 59999 +   │ left  .124.10  │
 │ teleop_hand_and_arm.py       │◄─────────►│ (systemd service)          │◄──UDP 50000/──►│ right .124.20  │
@@ -14,8 +14,12 @@ and how to set the whole chain up from a fresh robot image.
 └──────────────────────────────┘           └────────────────────────────┘
 ```
 
+DDS uses the **192.168.123.x** side of Thor (`br0`), the same network as the H2's own DDS. The
+Sharpa SDK talks to the hands over the separate **192.168.124.x** side (`br1`).
+
 - The hands sit on the 192.168.124.0/24 network behind Thor (`eth11`, bridged as `br1`).
-  Thor is the only machine that talks to them with the Sharpa SDK.
+  Thor is the only machine that talks to them with the Sharpa SDK. That link is plain UDP/TCP and
+  does not depend on the DDS interface setting.
 - The **DDS bridge** (`scripts/sharpa_dds_bridge.cpp`) runs on Thor. It connects to the hands
   with the Sharpa C++ SDK and republishes them as DDS topics, so the workstation needs no
   Sharpa SDK.
@@ -46,7 +50,16 @@ Rules that are easy to get wrong:
 - **Last writer wins** if several clients publish to the same `cmd` topic.
 - The bridge sends all joints to **0 at startup and at shutdown**, so the hands move to their zero
   pose whenever the service starts or stops.
-- Only `motor_cmd[i].q` is used. `mode`, `dq`, `tau`, `kp`, `kd` are ignored.
+- `motor_cmd[i].q` carries the targets. `dq`, `tau`, `kp`, `kd` are ignored.
+- **Control mode** (bridge built from this revision or later): `motor_cmd[0].mode` selects the
+  hand's control mode with the Sharpa `ControlMode` ids, **13 = POSITION** (default) and
+  **10 = ZERO_FORCE** (zero torque: the fingers go limp and can be moved by hand; targets are kept
+  but not sent). **0 leaves the mode unchanged**, which is what older clients send, so they keep
+  working. A switch back to POSITION resumes with the targets of the message that requested it:
+  send the measured pose there so the hand does not jump. The bridge reports the current mode in
+  `motor_state[i].mode` of every state message (13 or 10; an older bridge reports 0). The agentic
+  robot console uses this for its "Hands → zero torque / position mode" buttons and refuses a
+  mode request that is not reported back.
 
 ### Joint order (22 per hand)
 
@@ -79,7 +92,7 @@ hardware limits. The slider window uses the same ranges.
    37 Mb/s of tactile data, so two would saturate a 100 Mb link.
 4. Commands every joint to 0, then runs two loops per hand: a state loop that publishes
    `HandState_` at `--state-hz`, and a command loop that sends the latest target to the hand at 50 Hz.
-5. On SIGINT/SIGTERM it commands zero again, stops the hand and disconnects.
+5. On SIGINT/SIGTERM it returns a zero-torque hand to position mode, commands zero again, stops the hand and disconnects.
 
 Known device facts (this robot): left hand `Wave-L-01` at 192.168.124.10, right hand
 `Wave-R-01` at 192.168.124.20, both firmware 3.0.7.
@@ -87,18 +100,26 @@ Known device facts (this robot): left hand `Wave-L-01` at 192.168.124.10, right 
 ## 4. Which network interface DDS uses (important)
 
 Unitree's `ChannelFactory` without an interface name lets CycloneDDS choose one. On Thor it
-chose the **Wi-Fi adapter**, not the hand network, so a workstation on a different network never
-finds the bridge. Pin both ends to the 192.168.124.x interface:
+chose the **Wi-Fi adapter**, so a workstation on a different network never finds the bridge. The
+bridge is pinned to the robot's DDS network, **192.168.123.x** (`br0`), so it shares a network with
+the H2's own DDS. Every client must use an interface on that network too:
 
 - **Thor (bridge)**: the service launcher sets
-  `CYCLONEDDS_URI='<CycloneDDS><Domain><General><Interfaces><NetworkInterface address="192.168.124.0" multicast="true"/></Interfaces></General></Domain></CycloneDDS>'`
+  `CYCLONEDDS_URI='<CycloneDDS><Domain><General><Interfaces><NetworkInterface address="192.168.123.0" multicast="true"/></Interfaces></General></Domain></CycloneDDS>'`
   The setting is controlled by `SHARPA_DDS_ADDRESS` in `/etc/default/sharpa-dds-bridge`
-  (default `192.168.124.0`; a subnet or an IP; empty disables pinning). A `CYCLONEDDS_URI` already
-  in the environment takes precedence.
-- **Workstation (clients)**: pass the interface that holds a 192.168.124.x address.
-  Here that is `eno2`:
-  `ChannelFactoryInitialize(0, "eno2")`, or `--network-interface eno2` for `teleop_hand_and_arm.py`.
-  `sharpa_joint_sliders.py` finds the interface itself.
+  (default `192.168.123.0`; a subnet or an IP; empty disables pinning). A `CYCLONEDDS_URI` already
+  in the environment takes precedence. Change it with
+  `sudo sed -i 's/^SHARPA_DDS_ADDRESS=.*/SHARPA_DDS_ADDRESS=<subnet>/' /etc/default/sharpa-dds-bridge`
+  then `sudo systemctl restart sharpa_dds_bridge` (the restart moves the hands to zero).
+- **Workstation (clients)**: pass the interface that holds a 192.168.123.x address:
+  `ChannelFactoryInitialize(0, "<iface>")`, or `--network-interface <iface>` for
+  `teleop_hand_and_arm.py`. `sharpa_joint_sliders.py` finds it itself (123.x first, then 124.x).
+  The workstation must be on the 192.168.123.x network (cabled to the robot's switch, or with an
+  address on it). DDS discovery uses multicast, which does not cross a router, so a workstation
+  that only reaches 123.x through routing will not find the bridge without a unicast peer
+  configuration in `CYCLONEDDS_URI`.
+- To use the hand network instead, set `SHARPA_DDS_ADDRESS=192.168.124.0` on Thor and use the
+  interface holding a 192.168.124.x address on the workstation (for example `eno2` here).
 
 ## 5. Setup
 
@@ -151,7 +172,7 @@ Copy `sharpa_dds_bridge.service`, `sharpa_dds_bridge_run.sh` and
 - `--bridge PATH` and `--sdk-lib DIR` override the default paths. `--no-start` installs without
   starting (starting moves the hands to zero). `--uninstall` removes it.
 - Settings in `/etc/default/sharpa-dds-bridge`: `SHARPA_SIDE` (both), `SHARPA_SPEED` (0.5),
-  `SHARPA_STATE_HZ` (50), `SHARPA_DDS_ADDRESS` (192.168.124.0), optional `SHARPA_EXTRA_ARGS`
+  `SHARPA_STATE_HZ` (50), `SHARPA_DDS_ADDRESS` (192.168.123.0), optional `SHARPA_EXTRA_ARGS`
   (for example `--tactile`). After editing: `sudo systemctl restart sharpa_dds_bridge`.
 - If the bridge cannot find a hand it exits after 300 s and systemd restarts it every 5 s.
 
@@ -170,8 +191,8 @@ python scripts/sharpa_joint_sliders.py --check     # prints msg/s for each hand;
 python scripts/sharpa_joint_sliders.py             # the slider window (section 6)
 ```
 
-Expect about 50 msg/s per hand. The workstation's 192.168.124.x address must be reachable from
-Thor (`ping 192.168.124.163`).
+Expect about 50 msg/s per hand. The workstation needs an interface on the 192.168.123.x network
+(`ping 192.168.123.163` must work).
 
 ## 6. Reading and controlling
 
@@ -208,7 +229,7 @@ left.set_joint_position(cmd)                 # publish; repeat at ~20-50 Hz to h
 `teleop/teleop_hand_and_arm.py --ee sharpa` only **reads** the hand state
 (`robot_hand_sharpa.py`, a daemon thread). Commands come from a separate retargeting process on the
 same DDS domain. Relevant options: `--sharpa-dds-domain` (default 0) and
-`--network-interface` (set it to the 192.168.124.x interface, for example `eno2`). The main process
+`--network-interface` (set it to the interface on the 192.168.123.x network). The main process
 calls `ChannelFactoryInitialize` once, and the Sharpa reader reuses it.
 
 ## 7. Test tools
@@ -228,7 +249,7 @@ source tree).
 
 | Symptom | Check |
 |---|---|
-| Workstation sees 0 msg/s | Is the bridge running (`systemctl status sharpa_dds_bridge`)? Same domain (0)? Both ends pinned to 192.168.124.x (section 4)? |
+| Workstation sees 0 msg/s | Is the bridge running (`systemctl status sharpa_dds_bridge`)? Same domain (0)? Both ends on the same network, 192.168.123.x by default (section 4)? The workstation needs an interface there. |
 | `Host key verification failed` / `Permission denied` over SSH after a reimage | New host key and empty `authorized_keys`; run `ssh-copy-id unitree@192.168.124.163`. |
 | Bridge exits: no devices found | Hands powered? `ping 192.168.124.10` / `.20` from Thor, check `br1` has 192.168.124.163. |
 | Manual run fails with a port in use | The service already holds UDP 50000/50005/54321; `sudo systemctl stop sharpa_dds_bridge` first. |

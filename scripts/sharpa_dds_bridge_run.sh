@@ -6,15 +6,16 @@
 #   SHARPA_STATE_HZ    state publish rate in Hz   (default: 50)
 #   SHARPA_EXTRA_ARGS  extra flags, e.g. --tactile
 #   SHARPA_DDS_ADDRESS subnet or IP whose interface DDS is pinned to
-#                      (default: 192.168.124.0, the hand network; empty = no pinning)
+#                      (default: 192.168.123.0, the robot's DDS network; empty = no pinning)
 #   INSTALL_DIR        holds sharpa_dds_bridge and lib/  (default: /opt/sharpa-dds-bridge)
 set -euo pipefail
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/sharpa-dds-bridge}"
-# Pin CycloneDDS to the hand network. Without this it picks whichever interface
-# it ranks first (the Wi-Fi adapter on Thor). A CYCLONEDDS_URI set by the
+# Pin CycloneDDS to the robot's DDS network (192.168.123.x, br0 on Thor), the same
+# network the H2's own DDS uses. Without this it picks whichever interface it
+# ranks first (the Wi-Fi adapter on Thor). A CYCLONEDDS_URI set by the
 # caller takes precedence.
-DDS_ADDRESS="${SHARPA_DDS_ADDRESS-192.168.124.0}"
+DDS_ADDRESS="${SHARPA_DDS_ADDRESS-192.168.123.0}"
 if [[ -z "${CYCLONEDDS_URI:-}" && -n "$DDS_ADDRESS" ]]; then
     export CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface address=\"$DDS_ADDRESS\" multicast=\"true\"/></Interfaces></General></Domain></CycloneDDS>"
 fi

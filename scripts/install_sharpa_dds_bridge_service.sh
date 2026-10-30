@@ -71,9 +71,9 @@ if [[ ! -f "$ENV_FILE" ]]; then
 SHARPA_SIDE=both
 SHARPA_SPEED=0.5
 SHARPA_STATE_HZ=50
-# DDS is pinned to the interface on this subnet (the hand network). Set an IP
+# DDS is pinned to the interface on this subnet (the robot's DDS network). Set an IP
 # to pick a specific interface, or leave empty to use the CycloneDDS default.
-SHARPA_DDS_ADDRESS=192.168.124.0
+SHARPA_DDS_ADDRESS=192.168.123.0
 # SHARPA_EXTRA_ARGS=--tactile
 CONF
 fi
